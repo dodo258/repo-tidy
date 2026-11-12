@@ -1,0 +1,16 @@
+# 构建产物
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+# 环境与密钥
+.env
+.env.*
+# 系统
+.DS_Store
+# agent worktree
+.claude/worktrees/
+# Mac 界面
+/mac/.build/
+/mac/build/
