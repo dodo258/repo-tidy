@@ -13,9 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false  # 只用标准库，没有 go.sum
       - name: gofmt
         run: |
           out=$(gofmt -l .)
@@ -27,9 +28,10 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          cache: false  # 只用标准库，没有 go.sum
       - run: go test -count=1 ./...
       - run: go build -o bin/repo-tidy ./cmd/repo-tidy
       - name: Mac App 构建和测试
