@@ -26,18 +26,25 @@ type jsonDoc struct {
 }
 
 type jsonTotals struct {
-	Repos              int   `json:"repos"`
-	Failed             int   `json:"failed"`
-	Clean              int   `json:"clean"`
-	Worktrees          int   `json:"worktrees"`
-	Branches           int   `json:"branches"`
-	RemovableWorktrees int   `json:"removable_worktrees"`
-	RemovableBranches  int   `json:"removable_branches"`
-	KeepWorktrees      int   `json:"keep_worktrees"`
-	KeepBranches       int   `json:"keep_branches"`
-	Unmerged           int   `json:"unmerged"`
-	FreeBytes          int64 `json:"free_bytes"`
-	Unmeasured         int   `json:"unmeasured"`
+	Repos              int         `json:"repos"`
+	Failed             int         `json:"failed"`
+	Clean              int         `json:"clean"`
+	Worktrees          int         `json:"worktrees"`
+	Branches           int         `json:"branches"`
+	RemovableWorktrees int         `json:"removable_worktrees"`
+	RemovableBranches  int         `json:"removable_branches"`
+	KeepWorktrees      int         `json:"keep_worktrees"`
+	KeepBranches       int         `json:"keep_branches"`
+	Unmerged           int         `json:"unmerged"`
+	FreeBytes          int64       `json:"free_bytes"`
+	Unmeasured         int         `json:"unmeasured"`
+	Filter             *jsonFilter `json:"filter"` // 没有筛选条件时为 null
+}
+
+type jsonFilter struct {
+	OlderThan        string `json:"older_than"`         // 用户写的时长，如 30d；没按时间筛为空
+	OlderThanSeconds int64  `json:"older_than_seconds"` // 同一时长换成秒；没按时间筛为 0
+	Only             string `json:"only"`               // worktrees、branches，或空（两种都要）
 }
 
 type jsonRepo struct {
@@ -88,6 +95,8 @@ type jsonHealth struct {
 }
 
 type jsonBackup struct {
+	Remote      string           `json:"remote"`
+	Required    bool             `json:"required"`
 	Present     bool             `json:"present"`
 	Online      bool             `json:"online"`
 	OnlineError string           `json:"online_error"`
@@ -105,7 +114,8 @@ type jsonBranchSync struct {
 }
 
 // JSON 把和 Text 同样的判定、体检结果写成一个 JSON 文档（字段说明见 docs/reference.md「JSON 输出」）。
-func JSON(w io.Writer, reps []Repo, now time.Time) error {
+// reps 是已经按 f 筛过的结果，f 写进 summary.filter。
+func JSON(w io.Writer, reps []Repo, now time.Time, f Filter) error {
 	o := Summarize(reps)
 	doc := jsonDoc{
 		Version: JSONVersion, GeneratedAt: now.Truncate(time.Second), Repos: []jsonRepo{},
@@ -114,6 +124,9 @@ func JSON(w io.Writer, reps []Repo, now time.Time) error {
 			RemovableWorktrees: o.RemovableWT, RemovableBranches: o.RemovableBr, KeepWorktrees: o.KeptWT, KeepBranches: o.KeptBr,
 			Unmerged: o.Unmerged, FreeBytes: o.FreeBytes, Unmeasured: o.Unmeasured,
 		},
+	}
+	if f.On() {
+		doc.Summary.Filter = &jsonFilter{OlderThan: f.OlderThan, OlderThanSeconds: int64(f.Age / time.Second), Only: f.Only}
 	}
 	for _, r := range Sort(reps) {
 		jr := jsonRepo{Root: r.Root, DefaultBranch: r.DefaultBranch, Note: r.Note, Error: r.Err, Mess: Mess(r), Clean: clean(r)}
@@ -158,7 +171,7 @@ func healthJSON(h health.Report) *jsonHealth {
 		Changes: h.Changes, Untracked: h.Untracked, Stashes: h.Stashes,
 		LastCommit: timeOrNil(h.LastCommit), LastCommitBranch: h.LastCommitBranch,
 		Backup: jsonBackup{
-			Present: h.Backup.Present, Online: h.Backup.Online, OnlineError: h.Backup.OnlineErr,
+			Remote: h.Backup.Remote, Required: h.Backup.Required, Present: h.Backup.Present, Online: h.Backup.Online, OnlineError: h.Backup.OnlineErr,
 			Checked: h.Backup.Checked, Stale: []jsonBranchSync{},
 		},
 		Errors: append([]string{}, h.Errs...),

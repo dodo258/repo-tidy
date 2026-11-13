@@ -56,6 +56,7 @@ func decodeSample() throws -> Report {
 }
 
 @Test func decodesReport() throws {
+    Lang.current = .zh
     let r = try decodeSample()
     #expect(r.summary.removable == 2 && r.summary.keep == 3 && r.summary.freeBytes == 2048)
     #expect(r.summary.removableLine == "可删 2 项，能腾出 2.0 KB")
@@ -104,6 +105,7 @@ func decodeSample() throws -> Report {
 }
 
 @Test func formatBytesAndAgo() {
+    Lang.current = .zh
     #expect(Format.bytes(223) == "223 B")
     #expect(Format.bytes(38_700) == "39 KB")
     #expect(Format.bytes(1_200_000_000) == "1.2 GB")
@@ -115,15 +117,76 @@ func decodeSample() throws -> Report {
 }
 
 @Test func locatesCLIInOrder() {
-    let exists: Set<String> = ["/custom/repo-tidy", "/h/go/bin/repo-tidy", "/opt/homebrew/bin/repo-tidy"]
-    let check = { exists.contains($0) }
-    #expect(CLI.locate(custom: "/custom/repo-tidy", environment: [:], home: "/h", isExecutable: check)?.path == "/custom/repo-tidy")
-    #expect(CLI.locate(custom: "", environment: [:], home: "/h", isExecutable: check)?.path == "/h/go/bin/repo-tidy")
-    #expect(CLI.locate(custom: nil, environment: [:], home: "/x", isExecutable: check)?.path == "/opt/homebrew/bin/repo-tidy")
-    #expect(CLI.locate(custom: nil, environment: [:], home: "/x", isExecutable: { _ in false }) == nil)
+    let app = "/A/RepoTidy.app/Contents/Helpers/repo-tidy"
+    let all: Set<String> = ["/custom/repo-tidy", "/env/repo-tidy", app, "/h/.local/bin/repo-tidy",
+                            "/h/go/bin/repo-tidy", "/opt/homebrew/bin/repo-tidy", "/p/repo-tidy"]
+    func find(_ custom: String?, env: [String: String] = ["REPO_TIDY_BIN": "/env/repo-tidy", "PATH": "/p"],
+              home: String = "/h", bundled: String? = app, exists: Set<String> = all) -> String? {
+        CLI.locate(custom: custom, environment: env, home: home, bundled: bundled, isExecutable: exists.contains)?.path
+    }
+    // 设置里指定的 → $REPO_TIDY_BIN → App 自带的 → 原来那些目录 → PATH
+    #expect(find("/custom/repo-tidy") == "/custom/repo-tidy")
+    #expect(find("") == "/env/repo-tidy")
+    #expect(find(nil, env: ["PATH": "/p"]) == app)
+    #expect(find(nil, env: ["REPO_TIDY_BIN": "", "PATH": "/p"]) == app)
+    // 设置里的路径不能执行时往后找，不卡在那里
+    #expect(find("/没有/repo-tidy", env: [:]) == app)
+    // 自带的坏了（没有或不能执行）才轮到常见目录和 PATH
+    #expect(find(nil, env: ["PATH": "/p"], exists: all.subtracting([app])) == "/h/.local/bin/repo-tidy")
+    #expect(find(nil, env: ["PATH": "/p"], bundled: nil) == "/h/.local/bin/repo-tidy")
+    #expect(find(nil, env: ["PATH": "/p"], home: "/x", exists: all.subtracting([app])) == "/opt/homebrew/bin/repo-tidy")
+    #expect(find(nil, env: ["PATH": "/p"], home: "/x", exists: ["/p/repo-tidy"]) == "/p/repo-tidy")
+    // 一个都没有：界面显示「没找到命令行工具」
+    #expect(find(nil, env: ["PATH": "/p"], exists: []) == nil)
+}
+
+@Test func bundledPathOnlyInsideApp() {
+    #expect(CLI.bundledPath(in: URL(fileURLWithPath: "/Applications/RepoTidy.app"))
+        == "/Applications/RepoTidy.app/Contents/Helpers/repo-tidy")
+    // swift build 直接跑时 bundle 是放可执行文件的目录，不算 App
+    #expect(CLI.bundledPath(in: URL(fileURLWithPath: "/src/mac/.build/debug")) == nil)
 }
 
 @Test func childPathPrefersHomebrewGit() {
     let env = CLI.childEnvironment(["PATH": "/usr/bin:/bin"])
     #expect(env["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+}
+
+@Test func parsesProgressLines() {
+    #expect(ScanProgress.parse("正在扫 3/13 repo-name") == ScanProgress(current: 3, total: 13, repo: "repo-name"))
+    #expect(ScanProgress.parse("Scanning 1/2 my repo") == ScanProgress(current: 1, total: 2, repo: "my repo"))
+    for bad in ["repo-tidy：路径 /x：no such file", "正在扫 3/13", "正在扫 0/2 x", "正在扫 3/2 x", "x 1/y z", ""] {
+        #expect(ScanProgress.parse(bad) == nil, "\(bad)")
+    }
+    #expect(ScanProgress.parse("Scanning 3/13 foo") == ScanProgress(current: 3, total: 13, repo: "foo"))
+    // 报错里去掉进度行，只留真正的错误；中英两种前缀都去掉
+    #expect(CLI.clean("正在扫 1/2 a\nrepo-tidy：读目录 /x：permission denied\n") == "读目录 /x：permission denied")
+    #expect(CLI.clean("Scanning 1/2 a\nrepo-tidy: read dir /x: permission denied\n") == "read dir /x: permission denied")
+}
+
+@Test func tailDeliversLinesAsTheyAreWritten() async throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("repo-tidy-tail-\(UUID().uuidString)")
+    FileManager.default.createFile(atPath: url.path, contents: nil)
+    defer {
+        // swiftlint:disable:next silent_try
+        try? FileManager.default.removeItem(at: url) // 临时文件，删不掉无所谓
+    }
+    let got = Lines()
+    let task = CLI.tail(url) { got.add($0) }
+    defer { task.cancel() }
+    let h = try FileHandle(forWritingTo: url)
+    defer { h.closeFile() }
+    h.write(Data("正在扫 1/2 a\n正在扫 2/".utf8))
+    for _ in 0..<100 where got.all.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(got.all == ["正在扫 1/2 a"]) // 没写完的半行先不给
+    h.write(Data("2 b\n".utf8))
+    for _ in 0..<100 where got.all.count < 2 { try await Task.sleep(for: .milliseconds(20)) }
+    #expect(got.all == ["正在扫 1/2 a", "正在扫 2/2 b"])
+}
+
+final class Lines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func add(_ l: String) { lock.withLock { lines.append(l) } }
+    var all: [String] { lock.withLock { lines } }
 }

@@ -16,7 +16,7 @@ struct MenuBarLabel: View {
                 Text("\(n)").monospacedDigit()
             }
         }
-        .accessibilityLabel(store.missingCLI ? "repo-tidy：没装命令行工具" : "repo-tidy：可删 \(n) 项")
+        .accessibilityLabel(store.missingCLI ? L.a11yMissing : L.a11yRemovable(n))
     }
 }
 
@@ -47,10 +47,10 @@ struct MenuBarPanel: View {
             }
             Divider()
             HStack {
-                Button("打开主窗口") { open(nil) }.keyboardShortcut("o")
-                Button("刷新") { store.refresh() }.keyboardShortcut("r").disabled(store.scanning)
+                Button(L.openMainWindow) { open(nil) }.keyboardShortcut("o")
+                Button(L.refresh) { store.refresh() }.keyboardShortcut("r").disabled(store.scanning)
                 Spacer()
-                Button("退出") { NSApp.terminate(nil) }.keyboardShortcut("q")
+                Button(L.quit) { NSApp.terminate(nil) }.keyboardShortcut("q")
             }
         }
         .padding(14)
@@ -58,8 +58,8 @@ struct MenuBarPanel: View {
     }
 
     private var status: String {
-        if store.scanning { return "扫描中…" }
-        if let t = store.lastScan { return "\(Format.clock(t)) 扫描" }
+        if store.scanning { return store.progress?.text ?? L.scanningEllipsis }
+        if let t = store.lastScan { return L.scannedAt(Format.clock(t)) }
         return ""
     }
 
@@ -67,13 +67,13 @@ struct MenuBarPanel: View {
     private var overview: some View {
         switch store.screen {
         case .missingCLI:
-            Text("没找到 repo-tidy 命令行工具，打开主窗口看怎么装。").font(Theme.note).foregroundStyle(Theme.held)
+            Text(L.panelMissing).font(Theme.note).foregroundStyle(Theme.held)
         case .scanning:
-            Text("正在扫描 \(Format.tildePath(store.scanRoot))…").font(Theme.note).foregroundStyle(.secondary)
+            Text(L.panelScanning(Format.tildePath(store.scanRoot))).font(Theme.note).foregroundStyle(.secondary)
         case let .failed(msg):
-            Text("扫描没完成：\(msg)").font(Theme.note).foregroundStyle(Theme.held).lineLimit(3)
+            Text(L.panelFailed(msg)).font(Theme.note).foregroundStyle(Theme.held).lineLimit(3)
         case .empty:
-            Text("\(Format.tildePath(store.scanRoot)) 下没有 git 仓库").font(Theme.note).foregroundStyle(.secondary)
+            Text(L.panelEmpty(Format.tildePath(store.scanRoot))).font(Theme.note).foregroundStyle(.secondary)
         case .allClean, .hasRemovable:
             if let s = store.report?.summary {
                 VStack(alignment: .leading, spacing: 3) {
@@ -81,9 +81,9 @@ struct MenuBarPanel: View {
                         Text(s.removableLine)
                             .font(Theme.body.weight(.medium)).foregroundStyle(Theme.cleared)
                     } else {
-                        Text("没有可删的项").font(Theme.body.weight(.medium))
+                        Text(L.nothingRemovable).font(Theme.body.weight(.medium))
                     }
-                    Text("\(s.repos) 个仓库 · 留着 \(s.keep) 项" + (s.unmerged > 0 ? "，其中 \(s.unmerged) 项有未合并内容" : ""))
+                    Text(L.panelKept(s.repos, s.keep, s.unmerged))
                         .font(Theme.note).foregroundStyle(.secondary)
                 }
             }

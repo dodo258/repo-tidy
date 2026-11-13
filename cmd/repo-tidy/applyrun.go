@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/dodo258/repo-tidy/internal/apply"
 	"github.com/dodo258/repo-tidy/internal/judge"
+	"github.com/dodo258/repo-tidy/internal/msg"
 	"github.com/dodo258/repo-tidy/internal/report"
 )
 
@@ -30,22 +32,23 @@ type applyRun struct {
 }
 
 // readWants 读 --select 的文件（- 是标准输入），按仓库分组，并按出现顺序返回仓库列表。
-func readWants(from string) (map[string][]apply.Want, []string, error) {
+func readWants(from string, lang msg.Lang) (map[string][]apply.Want, []string, error) {
+	t := msg.For(lang)
 	r := io.Reader(os.Stdin)
 	if from != "-" {
 		f, err := os.Open(from)
 		if err != nil {
-			return nil, nil, fmt.Errorf("打开 --select 文件：%w", err)
+			return nil, nil, fmt.Errorf(t.OpenSelect, err)
 		}
 		defer f.Close()
 		r = f
 	}
-	list, err := apply.ReadWants(r)
+	list, err := apply.ReadWants(r, lang)
 	if err != nil {
 		return nil, nil, err
 	}
 	if len(list) == 0 {
-		return nil, nil, fmt.Errorf("--select 里没有要删的项")
+		return nil, nil, errors.New(t.SelectEmpty)
 	}
 	wants := map[string][]apply.Want{}
 	var repos []string
@@ -59,7 +62,8 @@ func readWants(from string) (map[string][]apply.Want, []string, error) {
 }
 
 // applyAll 删除 reps 里可删的项；wants 不为 nil 时只删勾选的。日志只在真有要删的项时才建。
-func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.Want, now time.Time, home string) (applyRun, error) {
+func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.Want, opts judge.Options, now time.Time, home string) (applyRun, error) {
+	t := msg.For(opts.Lang)
 	var run applyRun
 	type job struct {
 		rep     judge.RepoReport
@@ -78,11 +82,11 @@ func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.
 			run.target += len(ws)
 			if r.Err != "" {
 				for _, w := range ws {
-					j.skipped = append(j.skipped, apply.Result{Kind: w.Kind, Name: w.Name, Msg: "仓库没扫成：" + r.Err})
+					j.skipped = append(j.skipped, apply.Result{Kind: w.Kind, Name: w.Name, Msg: fmt.Sprintf(t.RepoNotScanned, r.Err)})
 				}
 				j.rep = judge.RepoReport{Root: r.Root}
 			} else {
-				j.rep, j.skipped = apply.Select(r.RepoReport, ws)
+				j.rep, j.skipped = apply.Select(r.RepoReport, ws, opts.Lang)
 			}
 		} else {
 			if r.Err != "" {
@@ -102,7 +106,7 @@ func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.
 	for _, repo := range missing {
 		run.target += len(wants[repo])
 		for _, w := range wants[repo] {
-			run.entries = append(run.entries, applyEntry{Repo: repo, Res: apply.Result{Kind: w.Kind, Name: w.Name, Msg: "不在这次扫描的仓库里"}})
+			run.entries = append(run.entries, applyEntry{Repo: repo, Res: apply.Result{Kind: w.Kind, Name: w.Name, Msg: t.NotInScan}})
 		}
 	}
 
@@ -115,7 +119,7 @@ func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.
 			continue
 		}
 		if log == nil {
-			p, f, err := openLog(now, home)
+			p, f, err := openLog(t, now, home)
 			if err != nil {
 				return run, err
 			}
@@ -123,7 +127,7 @@ func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.
 			fmt.Fprintf(f, "# repo-tidy --apply %s\n", now.Format(time.RFC3339))
 			run.logPath, log = p, f
 		}
-		results, err := apply.Apply(ctx, j.rep, log)
+		results, err := apply.Apply(ctx, j.rep, opts, log)
 		if err != nil {
 			run.entries = append(run.entries, applyEntry{Repo: j.rep.Root, Err: err.Error()})
 			run.failed = true
@@ -138,34 +142,34 @@ func applyAll(ctx context.Context, reps []report.Repo, wants map[string][]apply.
 	}
 	if log != nil {
 		if err := log.Sync(); err != nil {
-			return run, fmt.Errorf("写日志：%w", err)
+			return run, fmt.Errorf(t.WriteLog, err)
 		}
 	}
 	return run, nil
 }
 
-func writeApplyText(w io.Writer, run applyRun) {
+func writeApplyText(w io.Writer, t *msg.Text, run applyRun) {
 	if run.target == 0 {
-		fmt.Fprintln(w, "没有可删的项。")
+		fmt.Fprintln(w, t.NothingToDelete)
 		return
 	}
-	fmt.Fprintln(w, "\n开始删除：")
+	fmt.Fprintln(w, t.Deleting)
 	for _, e := range run.entries {
 		if e.Err != "" {
-			fmt.Fprintf(w, "  %s：%s\n", e.Repo, e.Err)
+			fmt.Fprintln(w, "  "+fmt.Sprintf(t.Colon, e.Repo, e.Err))
 			continue
 		}
-		mark := "没删"
+		mark := t.Skipped
 		if e.Res.Done {
-			mark = "已删"
+			mark = t.Deleted
 		}
-		fmt.Fprintf(w, "  %s  %s %s：%s\n", mark, kindName(e.Res.Kind), e.Res.Name, e.Res.Msg)
+		fmt.Fprintf(w, t.ApplyLine, mark, kindName(t, e.Res.Kind), e.Res.Name, e.Res.Msg)
 	}
 	if run.logPath == "" {
-		fmt.Fprintf(w, "\n删了 %d 项。\n", run.done)
+		fmt.Fprintf(w, t.ApplyDone, t.Items.N(run.done))
 		return
 	}
-	fmt.Fprintf(w, "\n删了 %d 项。恢复命令在 %s\n", run.done, run.logPath)
+	fmt.Fprintf(w, t.ApplyDoneLog, t.Items.N(run.done), run.logPath)
 }
 
 type applyJSONDoc struct {

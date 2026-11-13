@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dodo258/repo-tidy/internal/judge"
+	"github.com/dodo258/repo-tidy/internal/msg"
 )
 
 // Overview 是所有仓库的汇总数字。
@@ -111,31 +112,60 @@ func Summarize(reps []Repo) Overview {
 	return o
 }
 
-// overview 输出报告开头的总览。
-func overview(w io.Writer, o Overview) {
-	scanned := fmt.Sprintf("扫了 %d 个仓库", o.Repos)
+// overview 输出报告开头的总览；有筛选条件时另起一行注明「已筛选」和条件。
+func overview(w io.Writer, t *msg.Text, o Overview, f Filter) {
+	scanned := t.OverviewScanned.N(o.Repos)
 	var notes []string
 	if o.Clean > 0 {
-		notes = append(notes, fmt.Sprintf("%d 个干净", o.Clean))
+		notes = append(notes, fmt.Sprintf(t.OverviewClean, o.Clean))
 	}
 	if o.Failed > 0 {
-		notes = append(notes, fmt.Sprintf("%d 个扫描失败", o.Failed))
+		notes = append(notes, fmt.Sprintf(t.OverviewFailed, o.Failed))
 	}
 	if len(notes) > 0 {
-		scanned += "（" + strings.Join(notes, "、") + "）"
+		scanned += fmt.Sprintf(t.Paren, strings.Join(notes, t.ListSep))
 	}
-	fmt.Fprintf(w, "\n总览  %s · 附加 worktree %d 个 · 本地分支 %d 个\n", scanned, o.Worktrees, o.Branches)
+	fmt.Fprintf(w, t.Overview, scanned, o.Worktrees, o.Branches)
 
-	free := "能腾出 " + Bytes(o.FreeBytes)
+	free := fmt.Sprintf(t.Frees, Bytes(o.FreeBytes))
 	if o.Unmeasured > 0 {
-		free += fmt.Sprintf("（另有 %d 个 worktree 没量到大小）", o.Unmeasured)
+		free += t.Unmeasured.N(o.Unmeasured)
 	}
-	fmt.Fprintf(w, "      可删 %d 项（worktree %d、分支 %d），%s\n", o.Removable(), o.RemovableWT, o.RemovableBr, free)
-	kept := fmt.Sprintf("      留着 %d 项（worktree %d、分支 %d）", o.Kept(), o.KeptWT, o.KeptBr)
+	fmt.Fprintf(w, t.RemovableLine, o.Removable(), o.RemovableWT, o.RemovableBr, free)
+	kept := fmt.Sprintf(t.KeptLine, o.Kept(), o.KeptWT, o.KeptBr)
 	if o.Unmerged > 0 {
-		kept += fmt.Sprintf("，其中 %d 项有未合并内容", o.Unmerged)
+		kept += fmt.Sprintf(t.KeptUnmerged, o.Unmerged)
 	}
 	fmt.Fprintln(w, kept)
+	if f.On() {
+		fmt.Fprintf(w, t.FilterLine, filterDesc(t, f))
+	}
+}
+
+// filterDesc 用这种语言写出筛选条件，如「最后活动在 30d 之前、只看本地分支」。
+func filterDesc(t *msg.Text, f Filter) string {
+	var parts []string
+	if f.OlderThan != "" {
+		parts = append(parts, fmt.Sprintf(t.FilterOlder, f.OlderThan))
+	}
+	switch f.Only {
+	case OnlyWorktrees:
+		parts = append(parts, t.FilterOnlyWT)
+	case OnlyBranches:
+		parts = append(parts, t.FilterOnlyBr)
+	}
+	return strings.Join(parts, t.ListSep)
+}
+
+// Removable 是一个仓库的可删项数。
+func Removable(r Repo) int {
+	n := 0
+	for _, it := range items(r) {
+		if it.Removable {
+			n++
+		}
+	}
+	return n
 }
 
 func items(r Repo) []judge.Item {

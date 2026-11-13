@@ -17,9 +17,11 @@ repo-tidy 把每个 worktree 和本地分支分成两类：
 
 **只删能证明的。** 分支内容算「已在默认分支」，要命中下面一条：末端是默认分支的祖先；整段改动的 patch-id 等于默认分支上某个提交（squash）；每个提交都有同 patch-id 的对应提交（rebase）；用 `git merge-tree` 模拟合并，结果和默认分支一模一样。都不满足时，只有远程跟踪引用包含它的末端才算「已推到远程」。worktree 还要干净：没有未提交改动、没有未跟踪文件、没有做到一半的操作，被忽略的文件要么能重新生成（`node_modules`、`dist` 这类），要么主工作区有一模一样的一份。
 
+**正在用的不动。** 代理在两次提交之间 worktree 是干净的，提交又自动推到了远程，只看内容会判成可删。所以 worktree 里有进程的工作目录（shell、`go test` 之类，报告里写出进程名和 pid），或者 index、HEAD、reflog 在 30 分钟内动过，就一律留着，检出的分支也跟着留着。时间可以用 `--min-idle` 改，`--min-idle 0` 关掉时间这条；查不了进程时当作可能在用。
+
 **每项给证据。** 不是一个名字列表，而是「内容已 squash 进 main：提交 a835964c「合并 导出 CSV」」这样一句能自己去核对的话。
 
-**删前确认。** 默认只读：扫描时不 fetch、不刷新 index、不往 `.git` 里写东西。加 `--apply` 才删，而且删之前每一项重新判定一遍，靠「已推到远程」的先联网 `git ls-remote` 确认远程现在还有；worktree 用 `git worktree remove`（不加 `--force`）。每删一项先把恢复命令写进日志，删错了照着跑一遍就回来。
+**删前确认。** 默认只读：扫描时不 fetch、不刷新 index、不往 `.git` 里写东西。加 `--apply` 才删，而且删之前每一项重新判定一遍（包括现查有没有进程在用），靠「已推到远程」的先联网 `git ls-remote` 确认远程现在还有；worktree 用 `git worktree remove`（不加 `--force`）。每删一项先把恢复命令写进日志，删错了 `repo-tidy --undo --apply` 一条命令建回来。
 
 ## 安装
 
@@ -57,23 +59,28 @@ repo-tidy ~/projects
 
 ~/projects/todo-app  3 个附加 worktree · 6 个本地分支 · 默认分支 main
   worktree  可删 1 · 留着 2
-    可删  .claude/worktrees/1105-export-csv  [agent/1105-export-csv]  今天动过 · 258 B
-          内容已 squash 进 main：提交 a835964c「合并 导出 CSV」
+    可删  .claude/worktrees/1105-export-csv  [agent/1105-export-csv]  7 天没动 · 258 B  squash 进 main a835964c
     留着  .claude/worktrees/1111-dark-mode  [agent/1111-dark-mode]  今天动过 · 278 B
           有未提交改动或未跟踪文件 1 个：theme.draft.ts
           有 1 个提交既不在 main 也没推到任何远程：2f9aa3e1「深色模式：颜色表」
     留着  .claude/worktrees/1102-api-keys  [agent/1102-api-keys]  今天动过 · 279 B
           有被忽略、不能重新生成的文件（主工作区没有同样一份）：.env
   本地分支  可删 3 · 留着 3
-    可删  agent/1107-fix-timezone  6 天没动
-          内容已 squash 进 main：提交 d7259337「日期按本地时区显示」
-    可删  agent/1109-search  3 天没动
-          已推到 backup/agent/1109-search（本地记录的远程提交 7aab07ec 包含它）
+    可删  agent/1107-fix-timezone  6 天没动  squash 进 main d7259337
+    可删  agent/1109-search  3 天没动  已推 backup/agent/1109-search
     留着  wip/voice-input  12 天没动
           有 1 个提交既不在 main 也没推到任何远程：f90c4e69「语音输入：试一下」
 ```
 
-每个仓库还有一段体检（只报不动）：占用空间、主工作区未提交改动和 stash、当前分支相对上游领先落后、最后一次提交，以及名为 `backup` 的远程是不是推到了最新（加 `--online` 联网查）。
+可删项一行一个，行尾是证据的短形式：在默认分支哪个提交里（`squash 进 main a835964c`），或推到了哪个远程引用（`已推 backup/agent/1109-search`）；一个仓库可删项超过 10 个时，先写一行按依据分类的计数（`可删 23 项：已合并 17、已推送 6`）。留着的项照旧逐条写原因。加 `--verbose` 每个可删项另起一行写完整证据，比如「内容已 squash 进 main：提交 a835964c「合并 导出 CSV」」。
+
+给的目录默认只找下面一层的仓库。代码按 `~/code/<组织>/<仓库>` 放的，加 `--depth 2`（最多 4）往下多找几层：找到仓库就不再进它里面（里面的 worktree、子模块不当成另一个仓库），跳过隐藏目录、`node_modules` 和符号链接。
+
+项太多时可以筛：`--older-than 30d`（或 `2w`）只看最后活动在一个月前的，`--only branches` 只看本地分支（`--only worktrees` 只看 worktree），两个能一起用。筛掉的项不显示、不计入总览，`--apply` 也不删；总览最后一行注明「已筛选」和条件。比如只清一个月没动的分支：`repo-tidy --older-than 30d --only branches --apply ~/projects`。
+
+每个仓库还有一段体检（只报不动）：占用空间、主工作区未提交改动和 stash、当前分支相对上游领先落后、最后一次提交，以及备份远程是不是推到了最新（加 `--online` 联网查）。备份远程默认叫 `backup`，用 `--backup-remote <名字>` 换成别的；仓库里没有这个远程就不提这一项，显式给了 `--backup-remote` 才会报「没有 <名字> 远程」。
+
+报告的语言按 `LC_ALL`、`LC_MESSAGES`、`LANG` 选：`zh` 开头用中文，其余用英文；`--lang zh` 或 `--lang en` 指定。Mac App 跟系统语言。
 
 **2. 清掉一个仓库里代理留下的东西**
 
@@ -82,7 +89,14 @@ repo-tidy ~/projects/app            # 先看
 repo-tidy --apply ~/projects/app    # 确认没问题再删
 ```
 
-删完会告诉你恢复日志在哪（`~/.local/state/repo-tidy/apply-<时间>.log`），里面是 `git branch <名字> <提交>`、`git worktree add …` 这样的命令。
+删完会告诉你恢复日志在哪（`~/.local/state/repo-tidy/apply-<时间>.log`），里面是 `git branch <名字> <提交>`、`git worktree add …` 这样的命令。删错了：
+
+```bash
+repo-tidy --undo            # 列出最近一次删掉的、现在能恢复的
+repo-tidy --undo --apply    # 建回来：分支指向原来的提交，worktree 回到原路径
+```
+
+`--undo <日志>` 指定撤销哪一次。已经存在的分支或目录跳过不动；提交已被 `git gc` 清掉的会报出来。
 
 **3. 给脚本和代理用**
 
@@ -102,14 +116,16 @@ repo-tidy --json ~/projects \
 
 ## Mac App
 
-不想敲命令，可以用 `mac/` 里的原生界面（SwiftUI，macOS 14 以上）：左边是全部仓库，按乱的程度排；右边是选中仓库的每个 worktree 和分支，带结论和证据。只有「可删」的能勾，点「清理」先弹窗把要删的每一项和证据再列一遍，确认才删。菜单栏图标显示可删项总数。
+不想敲命令，可以用 `mac/` 里的原生界面（SwiftUI，macOS 14 以上）：左边是全部仓库，按乱的程度排；右边是选中仓库的每个 worktree 和分支，带结论和证据。只有「可删」的能勾，点「清理」先弹窗把要删的每一项和证据再列一遍，确认才删；删完的结果弹窗里有「撤销这次清理」，走的是同一条 `repo-tidy --undo`。菜单栏图标显示可删项总数。
 
 <p>
   <img src="docs/screenshots/confirm.png" width="49%" alt="删除前逐项确认">
   <img src="docs/screenshots/main-dark.png" width="49%" alt="深色模式">
 </p>
 
-App 只是外壳，判定和删除全由命令行做，所以要先装好上面的 `repo-tidy`。App 暂时没有签名和公证，从源码编（需要 Xcode 或 Swift 6 工具链）：
+不用另装命令行：打包时同一份源码编的 `repo-tidy`（Apple 芯片和 Intel 通用）放在 `RepoTidy.app/Contents/Helpers/` 里，App 的判定和删除全由它来做，界面不另写一套。想用自己编的版本，在设置里填路径或设 `REPO_TIDY_BIN`。设置里的「往下找几层」就是命令行的 `--depth`。
+
+App 暂时没有签名和公证，从源码编（需要 Go 1.26 和 Xcode 或 Swift 6 工具链）：
 
 ```bash
 git clone https://github.com/dodo258/repo-tidy && cd repo-tidy
@@ -131,8 +147,7 @@ repo-tidy 不做的事：不清构建产物和缓存（用 npkill、Mole 这类�
 
 ## 现在的限制
 
-- 输出只有中文，英文输出在计划里。
-- 体检里的 backup 一项只看名叫 `backup` 的远程。
+- Mac App 还没有签名和公证，只能从源码编。
 - 删分支只删引用，提交对象要等 `git gc` 才真正释放，所以「能腾出的空间」只算可删 worktree 的目录大小。
 
 ## 开发
@@ -140,6 +155,7 @@ repo-tidy 不做的事：不清构建产物和缓存（用 npkill、Mole 这类�
 ```bash
 go test ./...                                   # 测试只在临时目录造仓库
 go build -o bin/repo-tidy ./cmd/repo-tidy
+mac/scripts/test-app.sh                         # 打包 App，在没装命令行的环境里用自带的扫一遍演示仓库
 cd mac && swift build && REPO_TIDY_BIN=$PWD/../bin/repo-tidy swift test
 ```
 

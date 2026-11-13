@@ -55,4 +55,16 @@ func scanThenApplySelectedAgainstRealCLI() async throws {
     #expect(!todoAfter.items.contains { $0.name == "agent/1107-fix-timezone" })
     #expect(todoAfter.items.filter(\.isRemovable).count == 3) // 其余可删项没被动
     #expect(todoAfter.keepCount == todo.keepCount)
+
+    // 撤销：按删除时的恢复日志把分支建回来，指向原来的提交
+    let undone = try await cli.undo(log: outcome.log)
+    #expect(undone.restored == 1 && undone.results.map(\.status) == [.restored])
+    guard case let .report(restored) = try await cli.scan(root: base + "/projects") else {
+        Issue.record("撤销后再扫描应该还有仓库")
+        return
+    }
+    let back = try #require(restored.repos.first { $0.name == "todo-app" }?.items.first { $0.name == pick.name })
+    #expect(back.head == pick.head)
+    // 再撤销一次：已经在了，跳过
+    #expect(try await cli.undo(log: outcome.log).results.map(\.status) == [.exists])
 }

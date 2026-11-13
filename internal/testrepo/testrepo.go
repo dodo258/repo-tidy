@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Isolate 把 git 的全局配置换成临时文件，并固定作者和时间相关的环境。
@@ -125,4 +126,21 @@ func LineDiff(a, b string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// Idle 把 worktree 的 index、HEAD、reflog 的修改时间往回拨两小时，
+// 让它不被「刚动过，可能还在用」那条规则留下（默认 --min-idle 是 30 分钟）。
+func Idle(t *testing.T, wt string) {
+	t.Helper()
+	gitDir := Git(t, wt, "rev-parse", "--absolute-git-dir")
+	old := time.Now().Add(-2 * time.Hour)
+	for _, f := range []string{"index", "HEAD", filepath.Join("logs", "HEAD")} {
+		p := filepath.Join(gitDir, f)
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

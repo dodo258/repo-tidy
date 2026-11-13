@@ -28,7 +28,7 @@ public struct Summary: Decodable, Sendable, Equatable {
 
     /// 「可删 5 项，能腾出 223 B」；没有可删 worktree（删分支不腾空间）时不提空间。
     public var removableLine: String {
-        freeBytes > 0 ? "可删 \(removable) 项，能腾出 \(Format.bytes(freeBytes))" : "可删 \(removable) 项"
+        freeBytes > 0 ? L.removableFreeing(removable, Format.bytes(freeBytes)) : L.removableLine(removable)
     }
     public var keep: Int { keepWorktrees + keepBranches }
 }
@@ -135,6 +135,27 @@ public struct ApplyOutcome: Decodable, Sendable, Equatable {
     }
 }
 
+/// `repo-tidy --undo <日志> --apply --json` 的输出：按恢复日志把删掉的项建回来的逐项结果。
+public struct UndoOutcome: Decodable, Sendable, Equatable {
+    public var log: String
+    public var restored: Int
+    public var results: [Entry]
+
+    public struct Entry: Decodable, Sendable, Equatable, Identifiable {
+        /// 恢复了、已经在了（跳过）、提交已被 gc 掉、失败；ready 只在不加 --apply 的预览里出现。
+        public enum Status: String, Decodable, Sendable { case ready, restored, exists, lost, failed }
+        public var repo: String
+        public var kind: Item.Kind
+        public var name: String
+        public var status: Status
+        public var message: String
+        public var id: String { "\(repo)\u{0}\(kind.rawValue)\u{0}\(name)" }
+    }
+
+    /// 没恢复成的项数（已经在了的也算）。
+    public var notRestored: Int { results.count - restored }
+}
+
 /// 交给 `repo-tidy --apply --select` 的勾选项，字段和 --json 每一项相同。
 struct Selection: Encodable {
     struct Want: Encodable { var repo, kind, name, head: String }
@@ -152,7 +173,7 @@ enum JSON {
         d.dateDecodingStrategy = .custom { dec in
             let s = try dec.singleValueContainer().decode(String.self)
             guard let date = parseRFC3339(s) else {
-                throw DecodingError.dataCorrupted(.init(codingPath: dec.codingPath, debugDescription: "时间格式不对：\(s)"))
+                throw DecodingError.dataCorrupted(.init(codingPath: dec.codingPath, debugDescription: L.badTime(s)))
             }
             return date
         }

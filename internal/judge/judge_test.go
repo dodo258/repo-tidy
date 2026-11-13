@@ -22,7 +22,7 @@ func setup(t *testing.T) string {
 
 func inspect(t *testing.T, dir string) RepoReport {
 	t.Helper()
-	rep, err := Inspect(context.Background(), dir)
+	rep, err := Inspect(context.Background(), dir, Options{})
 	if err != nil {
 		t.Fatalf("Inspect：%v", err)
 	}
@@ -328,4 +328,35 @@ func TestIgnoredFileInTrackedRegenerableDir(t *testing.T) {
 
 	rep := inspect(t, dir)
 	wantKeep(t, find(t, rep.Worktrees, "wt"), "build/prod.env")
+}
+
+// 分支经过另一个分支合并进默认分支：证据是默认分支第一父链上最早包含它的那个合并提交，
+// 不是中间分支上的合并；在默认分支上的旧提交写「已在 main 上」。
+func TestMergedThroughAnotherBranch(t *testing.T) {
+	dir := setup(t)
+	g := func(args ...string) string { return tr.Git(t, dir, args...) }
+	old := g("rev-parse", "HEAD")
+	g("branch", "old")
+	g("switch", "-q", "-c", "inner")
+	tr.Commit(t, dir, "inner.txt", "i\n", "inner work")
+	g("switch", "-q", "-c", "feat", "main")
+	tr.Commit(t, dir, "feat.txt", "f\n", "feat work")
+	g("merge", "-q", "--no-ff", "-m", "inner into feat", "inner")
+	g("switch", "-q", "main")
+	tr.Commit(t, dir, "m.txt", "m\n", "main moves")
+	g("merge", "-q", "--no-ff", "-m", "first merge", "feat")
+	first := g("rev-parse", "HEAD")
+	tr.Commit(t, dir, "after.txt", "a\n", "after")
+	g("switch", "-q", "-c", "late")
+	tr.Commit(t, dir, "late.txt", "l\n", "late work")
+	g("switch", "-q", "main")
+	g("merge", "-q", "--no-ff", "-m", "second merge", "late")
+	second := g("rev-parse", "HEAD")
+	tr.Commit(t, dir, "z.txt", "z\n", "tail")
+
+	rep := inspect(t, dir)
+	wantRemovable(t, find(t, rep.Branches, "inner"), Merged, "已合并进 main", short8(first))
+	wantRemovable(t, find(t, rep.Branches, "feat"), Merged, "已合并进 main", short8(first))
+	wantRemovable(t, find(t, rep.Branches, "late"), Merged, "已合并进 main", short8(second))
+	wantRemovable(t, find(t, rep.Branches, "old"), Merged, "已在 main 上", short8(old))
 }

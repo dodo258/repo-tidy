@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/dodo258/repo-tidy/internal/judge"
+	"github.com/dodo258/repo-tidy/internal/msg"
 )
 
 // Want 是要删的一项：哪个仓库、worktree 还是分支、名字，以及挑选时看到的提交。
@@ -36,18 +38,20 @@ type wantDoc struct {
 }
 
 // ReadWants 读 {"items":[Want...]}；每项四个字段都要有，kind 只能是 worktree 或 branch。
-func ReadWants(r io.Reader) ([]Want, error) {
+// 出错说明用 lang 这种语言。
+func ReadWants(r io.Reader, lang msg.Lang) ([]Want, error) {
+	t := msg.For(lang)
 	var doc wantDoc
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("读勾选的项：%w", err)
+		return nil, fmt.Errorf(t.ReadSelected, err)
 	}
 	wants := make([]Want, 0, len(doc.Items))
 	for i, it := range doc.Items {
 		w := it.Want
 		if w.Repo == "" || w.Name == "" || w.Head == "" || (w.Kind != judge.KindWorktree && w.Kind != judge.KindBranch) {
-			return nil, fmt.Errorf("第 %d 项缺 repo、name、head，或 kind 不是 worktree/branch：%+v", i+1, w)
+			return nil, fmt.Errorf(t.BadWant, i+1, w)
 		}
 		wants = append(wants, w)
 	}
@@ -57,7 +61,8 @@ func ReadWants(r io.Reader) ([]Want, error) {
 // Select 只保留 r 里勾选了的可删项，其余一律当作留着；勾选了但这次不能删的
 // （已经不在、现在判定要留着、提交和挑选时不一样、分支还检出在没勾选的 worktree 里）记一条「没删」。
 // 返回的报告交给 Apply，Apply 删前还会再判定一次。
-func Select(r judge.RepoReport, wants []Want) (judge.RepoReport, []Result) {
+func Select(r judge.RepoReport, wants []Want, lang msg.Lang) (judge.RepoReport, []Result) {
+	t := msg.For(lang)
 	picked := map[string]bool{}
 	var skipped []Result
 	out := r
@@ -68,11 +73,11 @@ func Select(r judge.RepoReport, wants []Want) (judge.RepoReport, []Result) {
 		it, ok := byName(items[w.Kind], w.Name)
 		switch {
 		case !ok:
-			skipped = append(skipped, Result{w.Kind, w.Name, false, "已经不在了"})
+			skipped = append(skipped, Result{w.Kind, w.Name, false, t.Gone})
 		case !it.Removable:
-			skipped = append(skipped, Result{w.Kind, w.Name, false, "现在判定要留着，不删"})
+			skipped = append(skipped, Result{w.Kind, w.Name, false, fmt.Sprintf(t.NowKeep, strings.Join(it.Reasons, t.ReasonSep))})
 		case it.Head != w.Head:
-			skipped = append(skipped, Result{w.Kind, w.Name, false, "提交和勾选时不一样了，这次不动"})
+			skipped = append(skipped, Result{w.Kind, w.Name, false, t.HeadChanged})
 		default:
 			picked[w.Kind+"\x00"+w.Name] = true
 		}
@@ -82,7 +87,7 @@ func Select(r judge.RepoReport, wants []Want) (judge.RepoReport, []Result) {
 		key := judge.KindBranch + "\x00" + wt.Branch
 		if wt.Branch != "" && picked[key] && !picked[judge.KindWorktree+"\x00"+wt.Name] {
 			delete(picked, key)
-			skipped = append(skipped, Result{judge.KindBranch, wt.Branch, false, "还检出在 worktree " + wt.Name + " 里，它没一起勾选，这次不删"})
+			skipped = append(skipped, Result{judge.KindBranch, wt.Branch, false, fmt.Sprintf(t.StillCheckedIn, wt.Name)})
 		}
 	}
 	for _, list := range [][]judge.Item{out.Worktrees, out.Branches} {

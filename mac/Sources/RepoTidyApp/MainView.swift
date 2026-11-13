@@ -11,7 +11,7 @@ struct MainView: View {
         Group {
             switch store.screen {
             case .missingCLI: MissingCLIView()
-            case .scanning: ScanningView(root: store.scanRoot)
+            case .scanning: ScanningView(root: store.scanRoot, progress: store.progress)
             case let .failed(msg): FailedView(message: msg)
             case .empty: EmptyFolderView()
             case .allClean, .hasRemovable: split
@@ -21,8 +21,8 @@ struct MainView: View {
         .toolbar { toolbar }
         .sheet(isPresented: $confirming) { ConfirmSheet() }
         .sheet(item: outcomeBinding) { OutcomeSheet(outcome: $0) }
-        .alert("没删成", isPresented: applyErrorShown) {
-            Button("好") { store.applyError = nil }
+        .alert(L.applyFailedTitle, isPresented: applyErrorShown) {
+            Button(L.ok) { store.applyError = nil }
         } message: {
             Text(store.applyError ?? "")
         }
@@ -53,14 +53,20 @@ struct MainView: View {
                     .lineLimit(1).truncationMode(.head)
                     .frame(maxWidth: 320)
             }
-            .help("扫描的文件夹：\(store.scanRoot)。点一下换一个")
+            .help(L.folderHelp(store.scanRoot))
         }
         ToolbarItem(placement: .primaryAction) {
             if store.scanning || store.applying {
-                ProgressView().controlSize(.small)
+                HStack(spacing: 8) {
+                    // 已有结果、重新扫描时，进度写在转圈旁边（第一次扫描整页都在说这件事，不重复）
+                    if store.scanning, store.screen != .scanning, let p = store.progress {
+                        ScanProgressLabel(progress: p).padding(.leading, 8)
+                    }
+                    ProgressView().controlSize(.small)
+                }
             } else {
-                Button { store.refresh() } label: { Label("重新扫描", systemImage: "arrow.clockwise") }
-                    .help("重新扫描（⌘R）")
+                Button { store.refresh() } label: { Label(L.rescan, systemImage: "arrow.clockwise") }
+                    .help(L.rescanHelp)
             }
         }
     }
@@ -86,8 +92,8 @@ func chooseFolder(_ store: Store) {
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
     panel.allowsMultipleSelection = false
-    panel.prompt = "扫描这个文件夹"
-    panel.message = "选放仓库的文件夹（扫它自己和下面一层的仓库），或者某一个仓库"
+    panel.prompt = L.folderPanelPrompt
+    panel.message = L.folderPanelMessage
     panel.directoryURL = URL(fileURLWithPath: (store.scanRoot as NSString).expandingTildeInPath)
     guard panel.runModal() == .OK, let url = panel.url else { return }
     store.scanRoot = url.path

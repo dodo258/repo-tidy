@@ -9,12 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dodo258/repo-tidy/internal/msg"
 	tr "github.com/dodo258/repo-tidy/internal/testrepo"
 )
 
 func inspect(t *testing.T, dir string, online bool) Report {
 	t.Helper()
-	r, err := Inspect(context.Background(), dir, online)
+	r, err := Inspect(context.Background(), dir, Options{Online: online}, msg.ZH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +145,29 @@ func TestNoBackup(t *testing.T) {
 	tr.Init(t, dir)
 	tr.Git(t, dir, "branch", "x")
 	r := inspect(t, dir, true)
-	if r.Backup.Present || r.Backup.Online || len(r.Backup.Stale) != 0 {
+	if r.Backup.Present || r.Backup.Online || len(r.Backup.Stale) != 0 || r.Backup.Remote != DefaultBackupRemote || r.Backup.Required {
 		t.Fatalf("没有 backup 远程时应标出来、不联网：%+v", r.Backup)
+	}
+}
+
+// 指定别的名字时比对那个远程；同一个仓库按默认名找不到 backup。显式指定的标 Required。
+func TestCustomBackupRemote(t *testing.T) {
+	dir, _ := withBackup(t)
+	tr.Git(t, dir, "remote", "rename", "backup", "mirror")
+	r, err := Inspect(context.Background(), dir, Options{BackupRemote: "mirror", RequireBackup: true}, msg.ZH)
+	if err != nil || len(r.Errs) > 0 {
+		t.Fatalf("体检失败：%v %v", err, r.Errs)
+	}
+	if !r.Backup.Present || r.Backup.Remote != "mirror" || !r.Backup.Required || r.Backup.Checked != 5 {
+		t.Fatalf("mirror 概况不对：%+v", r.Backup)
+	}
+	want := "diverged diverged 1 1\nlagging behind 1 0\nunpushed not-pushed 0 0"
+	if got := stale(r); got != want {
+		t.Fatalf("没推到最新的分支：\n%s\n想要：\n%s", got, want)
+	}
+	r = inspect(t, dir, true)
+	if r.Backup.Present || r.Backup.Online || r.Backup.Remote != "backup" {
+		t.Fatalf("默认名下应找不到 backup、也不联网：%+v", r.Backup)
 	}
 }
 
@@ -267,7 +289,7 @@ func TestBareRepoSkipped(t *testing.T) {
 	tr.Isolate(t)
 	bare := filepath.Join(t.TempDir(), "b.git")
 	tr.Git(t, filepath.Dir(bare), "init", "-q", "--bare", bare)
-	r, err := Inspect(context.Background(), bare, false)
+	r, err := Inspect(context.Background(), bare, Options{}, msg.ZH)
 	if err != nil || r.Note == "" {
 		t.Fatalf("裸仓库应跳过并说明：%+v %v", r, err)
 	}

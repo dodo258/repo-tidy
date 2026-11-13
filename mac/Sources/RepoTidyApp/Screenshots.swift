@@ -2,7 +2,9 @@ import AppKit
 import RepoTidyKit
 import SwiftUI
 
-/// 截图模式：`RepoTidy --screenshot <输出目录> --cli <repo-tidy> --messy <目录> --clean <目录> --empty <目录> [--home <目录>]`。
+/// 截图模式：`RepoTidy --screenshot <输出目录> [--cli <repo-tidy>] --messy <目录> --clean <目录> --empty <目录> [--home <目录>] [--lang zh|en]`。
+/// `--lang` 指定界面语言（也传给命令行），不给就跟系统。
+/// 不给 `--cli` 就和正常打开 App 一样自己找命令行（App 自带的优先），用的哪个打印出来。
 /// `--home` 让截图里的路径按这个目录缩写成 `~`，不露出本机的临时目录。
 /// 用真的命令行扫临时目录里造的仓库（scripts/demo-repos.sh），把各状态的窗口画到屏幕外再存成 PNG，
 /// 不在屏幕上弹窗口，也不碰 ~/projects。「有可删项」那一组会真的删一次勾选的项，截删完的结果。
@@ -24,7 +26,7 @@ enum Screenshots {
     }
 
     struct Args {
-        var out = "", cli = "", messy = "", clean = "", empty = "", home = ""
+        var out = "", cli = "", messy = "", clean = "", empty = "", home = "", lang = ""
 
         init(_ argv: [String]) {
             var it = argv.dropFirst().makeIterator()
@@ -36,6 +38,7 @@ enum Screenshots {
                 case "--clean": clean = it.next() ?? ""
                 case "--empty": empty = it.next() ?? ""
                 case "--home": home = it.next() ?? ""
+                case "--lang": lang = it.next() ?? ""
                 default: break
                 }
             }
@@ -45,13 +48,20 @@ enum Screenshots {
     struct Failure: Error, CustomStringConvertible { let description: String }
 
     static func shootAll(_ a: Args) async throws {
-        guard !a.out.isEmpty, !a.cli.isEmpty, !a.messy.isEmpty, !a.clean.isEmpty, !a.empty.isEmpty else {
-            throw Failure(description: "参数不全：--screenshot 目录 --cli 路径 --messy 目录 --clean 目录 --empty 目录")
+        guard !a.out.isEmpty, !a.messy.isEmpty, !a.clean.isEmpty, !a.empty.isEmpty else {
+            throw Failure(description: "参数不全：--screenshot 目录 [--cli 路径] --messy 目录 --clean 目录 --empty 目录")
         }
+        if !a.lang.isEmpty {
+            guard let lang = Lang(rawValue: a.lang) else { throw Failure(description: "--lang 只认 zh 或 en：\(a.lang)") }
+            Lang.current = lang
+        }
+        let exe = a.cli.isEmpty ? CLI.locate(custom: nil) : URL(fileURLWithPath: a.cli)
+        guard let exe else { throw Failure(description: "没找到 repo-tidy 命令行") }
+        print("命令行：\(exe.path)")
         if !a.home.isEmpty { Format.home = a.home }
         let out = URL(fileURLWithPath: a.out)
         try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-        let cli = CLI(executable: URL(fileURLWithPath: a.cli))
+        let cli = CLI(executable: exe)
         let main = CGSize(width: 1100, height: 700)
 
         // 1. 空状态：文件夹下没有仓库
@@ -61,7 +71,18 @@ enum Screenshots {
         // 2. 扫描中（扫描永远不结束的假后端，画面和真扫描时一样）
         let scanning = store(root: a.messy) { _ in Hanging() }
         scanning.refresh()
+        for _ in 0..<100 where scanning.progress == nil { try await Task.sleep(for: .milliseconds(10)) }
         try await shoot(MainView().environment(scanning), main, "2-scanning", out)
+        try await shoot(MenuBarPanel().environment(scanning), CGSize(width: 320, height: 160), "2-menubar", out, chrome: false)
+        // 已有结果、点了重新扫描：进度写在工具栏的转圈旁边
+        let first = Once()
+        let rescanning = store(root: a.messy) { _ in first.take() ? cli as Backend : Hanging() }
+        rescanning.refresh()
+        try await waitIdle(rescanning)
+        rescanning.selectedRepoID = rescanning.repos(in: .messy).first?.id
+        rescanning.refresh()
+        for _ in 0..<100 where rescanning.progress == nil { try await Task.sleep(for: .milliseconds(10)) }
+        try await shoot(MainView().environment(rescanning), main, "2-rescanning", out)
 
         // 3. 有可删项：选最乱的仓库，勾上它可删的项
         let messy = try await scanned(cli, root: a.messy)
@@ -84,6 +105,16 @@ enum Screenshots {
                         CGSize(width: 600, height: 360), "3-outcome", out, chrome: false)
         messy.outcome = nil
         try await shoot(MainView().environment(messy), main, "3-after-clean", out)
+        // 在结果弹窗里点「撤销这次清理」：真的按恢复日志建回来，截恢复的结果
+        messy.outcome = outcome
+        await messy.undoLastApply()
+        try await waitIdle(messy)
+        guard let undone = messy.undoOutcome, undone.restored > 0 else {
+            throw Failure(description: "撤销没有恢复任何项：\(messy.undoError ?? "")")
+        }
+        try await shoot(OutcomeSheet(outcome: ApplyOutcomeBox(outcome: outcome)).environment(messy),
+                        CGSize(width: 600, height: 360), "3-undone", out, chrome: false)
+        messy.outcome = nil
 
         // 4. 全部干净
         let clean = try await scanned(cli, root: a.clean)
@@ -91,13 +122,18 @@ enum Screenshots {
         try await shoot(MenuBarPanel().environment(clean), CGSize(width: 320, height: 230), "4-menubar", out, chrome: false)
 
         // 5. 出错：命令行报错（路径不存在）
-        let failed = try await scanned(cli, root: a.empty + "/不存在的文件夹")
+        let failed = try await scanned(cli, root: a.empty + "/no-such-folder")
         try await shoot(MainView().environment(failed), main, "5-failed", out)
 
-        // 6. 没装命令行工具
+        // 6. 没找到命令行工具（App 自带的也坏了）
         let missing = store(root: a.messy) { _ in nil }
         missing.refresh()
         try await shoot(MainView().environment(missing), main, "6-missing-cli", out)
+
+        // 7. 设置：扫描的文件夹、往下找几层、命令行工具
+        let settings = store(root: a.messy) { _ in nil }
+        settings.scanDepth = 2
+        try await shoot(SettingsView().environment(settings), CGSize(width: 560, height: 230), "7-settings", out, chrome: false)
     }
 
     /// 每个场景一套独立的设置，不读写用户自己的。
@@ -158,17 +194,29 @@ enum Screenshots {
     }
 }
 
+/// 第一次 take() 返回真，之后都是假。
+@MainActor
+final class Once {
+    private var used = false
+    func take() -> Bool {
+        defer { used = true }
+        return !used
+    }
+}
+
 /// 允许放在屏幕外，不被系统拉回可见区域。
 final class OffscreenWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
-/// 永远扫不完的后端，只给「扫描中」截图用。
+/// 永远扫不完的后端，只给「扫描中」截图用：报一次进度（演示目录里两个仓库，正扫第二个）就停住。
 struct Hanging: Backend {
-    func scan(root: String, online: Bool) async throws -> ScanResult {
+    func scan(root: String, depth: Int, online: Bool, progress: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult {
+        progress(ScanProgress(current: 2, total: 2, repo: "todo-app"))
         try await Task.sleep(for: .seconds(3600))
         throw CancellationError()
     }
 
     func apply(_ items: [Item]) async throws -> ApplyOutcome { throw CancellationError() }
+    func undo(log: String) async throws -> UndoOutcome { throw CancellationError() }
 }

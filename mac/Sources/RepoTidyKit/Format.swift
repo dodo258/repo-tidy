@@ -24,13 +24,13 @@ public enum Format {
 
     /// 「刚刚」「3 小时前」「12 天前」；超过一年写日期。
     public static func ago(_ date: Date?, now: Date = Date()) -> String {
-        guard let date else { return "不知道" }
+        guard let date else { return L.unknownTime }
         let s = now.timeIntervalSince(date)
         switch s {
-        case ..<60: return "刚刚"
-        case ..<3600: return "\(Int(s / 60)) 分钟前"
-        case ..<86400: return "\(Int(s / 3600)) 小时前"
-        case ..<(86400 * 365): return "\(Int(s / 86400)) 天前"
+        case ..<60: return L.justNow
+        case ..<3600: return L.minutesAgo(Int(s / 60))
+        case ..<86400: return L.hoursAgo(Int(s / 3600))
+        case ..<(86400 * 365): return L.daysAgo(Int(s / 86400))
         default:
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd"

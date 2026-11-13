@@ -22,8 +22,8 @@ struct StatePage<Actions: View>: View {
                         .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
             }
+            // 不加 fixedSize：放在分栏右边（全部干净）时，固定高度的长句会把分栏撑高，左栏被顶到标题栏下面
             Text(detail).font(Theme.body).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             actions
         }
         .frame(maxWidth: 520, alignment: .leading)
@@ -34,12 +34,27 @@ struct StatePage<Actions: View>: View {
 
 struct ScanningView: View {
     let root: String
+    let progress: ScanProgress?
 
     var body: some View {
-        StatePage(title: "正在扫描", path: root, busy: true,
-                  detail: "每个仓库要跑几十次 git 来比对提交，仓库多的话要等十几秒。只读：不 fetch、不改任何文件。") {
-            EmptyView()
+        StatePage(title: L.scanningTitle, path: root, busy: true, detail: L.scanningDetail) {
+            // 不画进度条：命令行几个仓库并行扫，「第几个」是开始扫的顺序，满格时最后几个还没扫完
+            if let progress { ScanProgressLabel(progress: progress) }
         }
+    }
+}
+
+/// 「正在扫 3/13 repo-name」：数字等宽，仓库名用标识的等宽字体，和命令行同一句话。
+struct ScanProgressLabel: View {
+    let progress: ScanProgress
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(L.progress(progress.current, progress.total)).font(Theme.meta)
+            Text(verbatim: progress.repo).font(Theme.name).lineLimit(1).truncationMode(.middle)
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -48,7 +63,7 @@ struct FailedView: View {
     let message: String
 
     var body: some View {
-        StatePage(title: "扫描没完成", detail: "repo-tidy 报了下面的错，什么都没删。") {
+        StatePage(title: L.failedTitle, detail: L.failedDetail) {
             Text(message)
                 .font(Theme.name)
                 .textSelection(.enabled)
@@ -56,8 +71,8 @@ struct FailedView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(RoundedRectangle(cornerRadius: Theme.blockRadius).fill(.quaternary.opacity(0.6)))
             HStack {
-                Button("重新扫描") { store.refresh() }.keyboardShortcut(.defaultAction)
-                Button("换个文件夹…") { chooseFolder(store) }
+                Button(L.rescan) { store.refresh() }.keyboardShortcut(.defaultAction)
+                Button(L.chooseAnotherFolder) { chooseFolder(store) }
             }
         }
     }
@@ -67,11 +82,10 @@ struct EmptyFolderView: View {
     @Environment(Store.self) private var store
 
     var body: some View {
-        StatePage(title: "这个文件夹下没有 git 仓库", path: store.scanRoot,
-                  detail: "repo-tidy 扫你选的文件夹本身和它下面一层的文件夹。换成放仓库的那一层，比如 ~/projects。") {
+        StatePage(title: L.emptyTitle, path: store.scanRoot, detail: L.emptyDetail) {
             HStack {
-                Button("换个文件夹…") { chooseFolder(store) }.keyboardShortcut(.defaultAction)
-                Button("重新扫描") { store.refresh() }
+                Button(L.chooseAnotherFolder) { chooseFolder(store) }.keyboardShortcut(.defaultAction)
+                Button(L.rescan) { store.refresh() }
             }
         }
     }
@@ -82,52 +96,45 @@ struct AllCleanView: View {
 
     var body: some View {
         if let s = store.report?.summary, s.removable == 0 {
-            StatePage(title: "没有能删的",
-                      detail: cleanDetail(s)) {
-                Text("左边选一个仓库，能看到每一项为什么留着。")
+            StatePage(title: L.allCleanTitle, detail: cleanDetail(s)) {
+                Text(L.allCleanHint)
                     .font(Theme.note).foregroundStyle(.tertiary)
             }
         } else {
-            StatePage(title: "选一个仓库", detail: "左边的仓库按乱的程度排，最乱的在最上面。") { EmptyView() }
+            StatePage(title: L.pickRepoTitle, detail: L.pickRepoDetail) { EmptyView() }
         }
     }
 
     private func cleanDetail(_ s: Summary) -> String {
-        var t = "扫了 \(s.repos) 个仓库"
-        if s.worktrees + s.branches == 0 {
-            return t + "，除了默认分支，没有附加 worktree，也没有别的本地分支。"
-        }
-        t += "，\(s.worktrees) 个 worktree、\(s.branches) 个分支都得留着"
-        if s.unmerged > 0 { t += "，其中 \(s.unmerged) 项有没合并也没推送的内容" }
-        return t + "。"
+        if s.worktrees + s.branches == 0 { return L.cleanNoItems(s.repos) }
+        return L.cleanAllKept(s.repos, s.worktrees, s.branches, s.unmerged)
     }
 }
 
-/// 没装命令行工具：说清楚它是什么、怎么装、找过哪里。
+/// App 自带的命令行没了（或不能执行），别处也没找到：说清楚它是什么、怎么补、找过哪里。
 struct MissingCLIView: View {
     @Environment(Store.self) private var store
     static let install = "go build -o ~/.local/bin/repo-tidy ./cmd/repo-tidy"
 
     var body: some View {
-        StatePage(title: "没找到 repo-tidy 命令行工具",
-                  detail: "这个 App 只是界面：判断哪些能删、真正去删，都由命令行工具 repo-tidy 来做。先把它装上。") {
+        StatePage(title: L.missingTitle, detail: L.missingDetail) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("在 repo-tidy 源码目录里运行（要 Go 1.26 和 git 2.38 以上）：").font(Theme.note)
+                Text(L.missingBuildHint).font(Theme.note)
                 HStack(spacing: 8) {
                     Text(Self.install).font(Theme.name).textSelection(.enabled)
                         .padding(.horizontal, 8).padding(.vertical, 6)
                         .background(RoundedRectangle(cornerRadius: Theme.blockRadius).fill(.quaternary.opacity(0.6)))
-                    Button("拷贝") {
+                    Button(L.copy) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(Self.install, forType: .string)
                     }
                 }
-                Text(verbatim: "找过这些位置：~/.local/bin、~/go/bin、/opt/homebrew/bin、/usr/local/bin、~/bin")
+                Text(L.missingSearched)
                     .font(Theme.meta).foregroundStyle(.tertiary)
             }
             HStack {
-                Button("重新查找") { store.refresh() }.keyboardShortcut(.defaultAction)
-                Button("装在别处，选择文件…") { chooseCLI(store) }
+                Button(L.searchAgain) { store.refresh() }.keyboardShortcut(.defaultAction)
+                Button(L.chooseCLIFile) { chooseCLI(store) }
             }
         }
     }
@@ -138,8 +145,8 @@ func chooseCLI(_ store: Store) {
     let panel = NSOpenPanel()
     panel.canChooseFiles = true
     panel.canChooseDirectories = false
-    panel.prompt = "用这个"
-    panel.message = "选 repo-tidy 可执行文件"
+    panel.prompt = L.cliPanelPrompt
+    panel.message = L.cliPanelMessage
     guard panel.runModal() == .OK, let url = panel.url else { return }
     store.cliPath = url.path
     store.refresh()

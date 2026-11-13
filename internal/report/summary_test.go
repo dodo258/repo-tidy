@@ -8,6 +8,7 @@ import (
 
 	"github.com/dodo258/repo-tidy/internal/health"
 	"github.com/dodo258/repo-tidy/internal/judge"
+	"github.com/dodo258/repo-tidy/internal/msg"
 )
 
 func wt(path string, removable bool, basis judge.Basis, unmerged bool) judge.Item {
@@ -21,7 +22,7 @@ func br(name string, removable, unmerged bool) judge.Item {
 func repo(root string, wts, brs []judge.Item, sizes ...health.Size) Repo {
 	return Repo{
 		RepoReport: judge.RepoReport{Root: root, DefaultBranch: "main", Worktrees: wts, Branches: brs},
-		Health:     &health.Report{Root: root, Worktrees: sizes, Backup: health.Backup{Present: true}},
+		Health:     &health.Report{Root: root, Worktrees: sizes, Backup: health.Backup{Remote: "backup", Present: true}},
 	}
 }
 
@@ -59,7 +60,7 @@ func TestSummarizeAndSort(t *testing.T) {
 	}
 
 	var w bytes.Buffer
-	Text(&w, reps, time.Now(), "")
+	Text(&w, reps, time.Now(), "", false, msg.ZH, Filter{})
 	s := w.String()
 	for _, line := range []string{
 		"总览  扫了 4 个仓库（1 个干净、1 个扫描失败） · 附加 worktree 4 个 · 本地分支 3 个",
@@ -75,13 +76,45 @@ func TestSummarizeAndSort(t *testing.T) {
 
 func TestAttention(t *testing.T) {
 	h := health.Report{Branch: "main", Upstream: "origin/main", Ahead: 2, Changes: 3, Stashes: 1,
-		Backup: health.Backup{Present: true, Stale: []health.BranchSync{{Branch: "x"}}}, Errs: []string{"e"}}
-	got := strings.Join(attention(h), "、")
+		Backup: health.Backup{Remote: "backup", Present: true, Stale: []health.BranchSync{{Branch: "x"}}}, Errs: []string{"e"}}
+	got := strings.Join(attention(msg.For(msg.ZH), h), "、")
 	want := "主工作区 3 个未提交改动、1 个 stash、main 和上游不一致（领先 2，落后 0）、backup 有 1 个分支没推到最新、体检有 1 项没查成"
 	if got != want {
 		t.Fatalf("实际 %s\n应为 %s", got, want)
 	}
-	if a := attention(health.Report{Backup: health.Backup{Present: true}}); len(a) != 0 {
+	if a := attention(msg.For(msg.ZH), health.Report{Backup: health.Backup{Remote: "backup", Present: true}}); len(a) != 0 {
 		t.Fatalf("没问题时不该有提示：%v", a)
+	}
+}
+
+// 没有备份远程：没显式指定时体检段和注意都不提；显式指定的要报；自定义名字写在体检和提示里（中英文都是）。
+func TestBackupRemoteMissing(t *testing.T) {
+	render := func(l msg.Lang, b health.Backup) (string, []string) {
+		var w strings.Builder
+		h := health.Report{Branch: "main", Backup: b}
+		checkup(&w, msg.For(l), h, time.Now())
+		return w.String(), attention(msg.For(l), h)
+	}
+	for _, l := range []msg.Lang{msg.ZH, msg.EN} {
+		if text, a := render(l, health.Backup{Remote: "backup"}); strings.Contains(text, "backup") || len(a) != 0 {
+			t.Fatalf("%s：没有 backup、也没指定时不该提：%q %v", l, text, a)
+		}
+	}
+	text, a := render(msg.ZH, health.Backup{Remote: "mirror", Required: true})
+	if !strings.Contains(text, "    mirror    没有 mirror 远程\n") || strings.Join(a, "、") != "没有 mirror 远程" {
+		t.Fatalf("显式指定的远程不在时要报：%q %v", text, a)
+	}
+	if text, a := render(msg.EN, health.Backup{Remote: "mirror", Required: true}); !strings.Contains(text, "no mirror remote\n") || strings.Join(a, ", ") != "no mirror remote" {
+		t.Fatalf("英文也要报：%q %v", text, a)
+	}
+	stale := health.Backup{Remote: "mirror", Present: true, Checked: 2, Stale: []health.BranchSync{{Branch: "x", State: health.Diverged, LocalOnly: 1, RemoteOnly: 2}}}
+	text, a = render(msg.ZH, stale)
+	if !strings.Contains(text, "    mirror    2 个本地分支里 1 个没推到最新") || !strings.Contains(text, "分叉  x：本地多 1 个提交、mirror 多 2 个") ||
+		strings.Join(a, "、") != "mirror 有 1 个分支没推到最新" {
+		t.Fatalf("自定义名字应写在体检和提示里：%q %v", text, a)
+	}
+	text, a = render(msg.EN, stale)
+	if !strings.Contains(text, "diverged  x: 1 commits only local, 2 only on mirror") || strings.Join(a, ", ") != "branches not up to date on mirror: 1" {
+		t.Fatalf("英文的自定义名字：%q %v", text, a)
 	}
 }

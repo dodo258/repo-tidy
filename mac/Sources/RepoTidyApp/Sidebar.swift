@@ -8,9 +8,9 @@ struct Sidebar: View {
     var body: some View {
         @Bindable var store = store
         List(selection: $store.selectedRepoID) {
-            section("要整理", .messy)
-            section("没扫成", .failed)
-            section("干净", .clean)
+            section(L.groupMessy, .messy)
+            section(L.groupFailed, .failed)
+            section(L.groupClean, .clean)
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) { overview }
@@ -31,15 +31,15 @@ struct Sidebar: View {
         if let s = store.report?.summary {
             VStack(alignment: .leading, spacing: Theme.gap) {
                 Divider()
-                Text("\(s.repos) 个仓库 · \(s.worktrees) 个 worktree · \(s.branches) 个分支")
+                Text(L.overviewCounts(s.repos, s.worktrees, s.branches))
                 if s.removable > 0 {
                     Text(s.removableLine)
                         .foregroundStyle(Theme.cleared)
                 } else {
-                    Text("没有可删的项")
+                    Text(L.nothingRemovable)
                 }
                 if let t = store.lastScan {
-                    Text("\(Format.clock(t)) 扫描（扫描只读，不改任何文件）").foregroundStyle(.tertiary)
+                    Text(L.scannedAtReadOnly(Format.clock(t))).foregroundStyle(.tertiary)
                 }
             }
             .font(Theme.meta)
@@ -66,7 +66,7 @@ struct RepoRow: View {
     }
 
     private var subtitle: String {
-        if !repo.error.isEmpty { return "没扫成" }
+        if !repo.error.isEmpty { return L.repoScanFailed }
         if !repo.note.isEmpty { return repo.note }
         return Format.tildePath((repo.root as NSString).deletingLastPathComponent)
     }
@@ -76,15 +76,15 @@ struct RepoRow: View {
         if repo.group != .failed, !repo.items.isEmpty {
             HStack(spacing: 6) {
                 if repo.removableCount > 0 {
-                    Text("可删 \(repo.removableCount)").foregroundStyle(Theme.cleared)
+                    Text(L.removableCount(repo.removableCount)).foregroundStyle(Theme.cleared)
                 }
                 if repo.keepCount > 0 {
-                    Text("留着 \(repo.keepCount)")
+                    Text(L.keepCount(repo.keepCount))
                         .foregroundStyle(repo.unmergedCount > 0 ? AnyShapeStyle(Theme.held) : AnyShapeStyle(.secondary))
                 }
             }
             .font(Theme.meta)
-            .help(repo.unmergedCount > 0 ? "留着的里面有 \(repo.unmergedCount) 项有没合并也没推送的内容" : "")
+            .help(repo.unmergedCount > 0 ? L.unmergedHelp(repo.unmergedCount) : "")
         }
     }
 }

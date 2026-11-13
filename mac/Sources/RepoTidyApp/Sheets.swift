@@ -12,8 +12,8 @@ struct ConfirmSheet: View {
         let groups = Dictionary(grouping: items, by: \.repo)
         let order = store.repos.map(\.root).filter { groups[$0] != nil }
         VStack(alignment: .leading, spacing: 12) {
-            Text("删除这 \(items.count) 项？").font(Theme.repoTitle)
-            Text("删之前 repo-tidy 会逐项再判定一次，和现在不一样的不删；靠「已推到远程」的会先联网确认远程还在。worktree 用 git worktree remove（不加 --force），恢复命令写进日志。")
+            Text(L.confirmTitle(items.count)).font(Theme.repoTitle)
+            Text(L.confirmBody)
                 .font(Theme.note).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {
@@ -33,8 +33,8 @@ struct ConfirmSheet: View {
             .overlay(RoundedRectangle(cornerRadius: Theme.blockRadius).strokeBorder(.separator))
             HStack {
                 Spacer()
-                Button("取消", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("删除 \(items.count) 项", role: .destructive) {
+                Button(L.cancel, role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(L.deleteCount(items.count), role: .destructive) {
                     dismiss()
                     Task { await store.applyChecked() }
                 }
@@ -49,7 +49,7 @@ struct ConfirmSheet: View {
     private func line(_ it: Item) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                Text(it.kind == .worktree ? "worktree" : "分支").font(Theme.meta).foregroundStyle(.secondary)
+                Text(it.kind == .worktree ? L.kindWorktree : L.kindBranch).font(Theme.meta).foregroundStyle(.secondary)
                     .frame(width: 56, alignment: .leading)
                 Text(it.displayName).font(Theme.name).lineLimit(1).truncationMode(.middle)
             }
@@ -58,7 +58,7 @@ struct ConfirmSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Evidence(text: it.evidence)
                     if let wt = store.worktreeFor(it), store.isChecked(wt) {
-                        Text("检出在上面那个 worktree 里，worktree 删掉后才删得了它").font(Theme.meta).foregroundStyle(.tertiary)
+                        Text(L.checkedOutAbove).font(Theme.meta).foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -66,7 +66,7 @@ struct ConfirmSheet: View {
     }
 }
 
-/// 删完的逐项结果。
+/// 删完的逐项结果；点「撤销这次清理」后换成恢复的逐项结果。
 struct OutcomeSheet: View {
     @Environment(Store.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -74,25 +74,25 @@ struct OutcomeSheet: View {
 
     var body: some View {
         let o = outcome.outcome
-        let skipped = o.results.filter { !$0.done }.count
         VStack(alignment: .leading, spacing: 12) {
-            Text(skipped == 0 && o.errors.isEmpty ? "删了 \(o.deleted) 项" : "删了 \(o.deleted) 项，\(skipped) 项没删")
-                .font(Theme.repoTitle)
+            Text(title(o)).font(Theme.repoTitle)
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(o.results) { r in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(r.done ? "已删" : "没删").font(Theme.verdict)
-                                .foregroundStyle(r.done ? AnyShapeStyle(Theme.cleared) : AnyShapeStyle(Theme.held))
-                                .frame(width: 30, alignment: .leading)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text((r.kind == .worktree ? "worktree " : "分支 ") + Format.itemName(r.name, repo: r.repo)).font(Theme.name)
-                                Text(r.message).font(Theme.note).foregroundStyle(.secondary)
-                            }
+                    if let u = store.undoOutcome {
+                        ForEach(u.results) { r in
+                            row(mark(r.status), color: color(r.status), marks: Self.undoMarks,
+                                kind: r.kind, name: Format.itemName(r.name, repo: r.repo), message: r.message)
                         }
-                    }
-                    ForEach(o.errors, id: \.repo) { e in
-                        Text("\(Format.tildePath(e.repo))：\(e.error)").font(Theme.note).foregroundStyle(Theme.held)
+                    } else {
+                        ForEach(o.results) { r in
+                            row(r.done ? L.resultDone : L.resultSkipped,
+                                color: r.done ? AnyShapeStyle(Theme.cleared) : AnyShapeStyle(Theme.held),
+                                marks: [L.resultDone, L.resultSkipped],
+                                kind: r.kind, name: Format.itemName(r.name, repo: r.repo), message: r.message)
+                        }
+                        ForEach(o.errors, id: \.repo) { e in
+                            Text(L.repoError(Format.tildePath(e.repo), e.error)).font(Theme.note).foregroundStyle(Theme.held)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -100,20 +100,73 @@ struct OutcomeSheet: View {
             }
             .frame(minHeight: 100, maxHeight: 320)
             .overlay(RoundedRectangle(cornerRadius: Theme.blockRadius).strokeBorder(.separator))
+            if let err = store.undoError {
+                Text(L.undoError(err)).font(Theme.note).foregroundStyle(Theme.held)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 if !o.log.isEmpty {
-                    Text("恢复命令在 \(Format.tildePath(o.log))").font(Theme.meta).foregroundStyle(.secondary)
+                    Text(L.restoreLog(Format.tildePath(o.log))).font(Theme.meta).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    Button("在 Finder 中显示") {
+                    Button(L.showInFinder) {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: o.log)])
                     }
                     .buttonStyle(.link).font(Theme.meta)
                 }
                 Spacer()
-                Button("好") { store.outcome = nil; dismiss() }.keyboardShortcut(.defaultAction)
+                if store.canUndo {
+                    if store.applying { ProgressView().controlSize(.small) }
+                    Button(L.undoCleanup) { Task { await store.undoLastApply() } }
+                        .help(L.undoHelp)
+                        .disabled(store.applying)
+                }
+                Button(L.ok) { store.outcome = nil; dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
         .frame(width: 600)
+    }
+
+    private func title(_ o: ApplyOutcome) -> String {
+        if let u = store.undoOutcome {
+            return u.notRestored == 0 ? L.restoredCount(u.restored) : L.restoredSkipped(u.restored, u.notRestored)
+        }
+        let skipped = o.results.filter { !$0.done }.count
+        return skipped == 0 && o.errors.isEmpty ? L.deletedCount(o.deleted) : L.deletedSkipped(o.deleted, skipped)
+    }
+
+    private static var undoMarks: [String] { [L.undoRestored, L.undoExists, L.undoLost, L.undoFailed] }
+
+    private func mark(_ s: UndoOutcome.Entry.Status) -> String {
+        switch s {
+        case .ready, .restored: return L.undoRestored
+        case .exists: return L.undoExists
+        case .lost: return L.undoLost
+        case .failed: return L.undoFailed
+        }
+    }
+
+    /// 恢复了用墨色（回到原样，不是核销）；跳过的淡一些；恢复不了、失败的用存疑赭。
+    private func color(_ s: UndoOutcome.Entry.Status) -> AnyShapeStyle {
+        switch s {
+        case .ready, .restored: return AnyShapeStyle(.primary)
+        case .exists: return AnyShapeStyle(.secondary)
+        case .lost, .failed: return AnyShapeStyle(Theme.held)
+        }
+    }
+
+    private func row(_ text: String, color: AnyShapeStyle, marks: [String], kind: Item.Kind, name: String, message: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // 各种结论叠在一起占位，列宽取最长的那个，换语言也对齐
+            ZStack(alignment: .leading) {
+                ForEach(marks, id: \.self) { Text($0).hidden() }
+                Text(text).foregroundStyle(color)
+            }
+            .font(Theme.verdict)
+            VStack(alignment: .leading, spacing: 2) {
+                Text((kind == .worktree ? L.kindWorktree : L.kindBranch) + " " + name).font(Theme.name)
+                Text(message).font(Theme.note).foregroundStyle(.secondary)
+            }
+        }
     }
 }

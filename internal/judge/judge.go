@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dodo258/repo-tidy/internal/gitx"
+	"github.com/dodo258/repo-tidy/internal/msg"
 )
 
 // Basis 是一条判定的依据。
@@ -40,6 +41,7 @@ type Item struct {
 	Removable  bool
 	Basis      Basis
 	Evidence   string   // 可删时的证据
+	Short      string   // 证据的短形式，给文字报告默认一行用（如「squash 进 main 3702a43d」）
 	Reasons    []string // 留着的原因
 	Unmerged   bool     // 留着，且有不在默认分支、也没推到远程的内容（独有提交或未提交改动）
 	LastActive time.Time
@@ -57,28 +59,29 @@ type RepoReport struct {
 	Branches      []Item // 本地分支，不含默认分支
 }
 
-// Inspect 扫描 dir 所在的仓库。
-func Inspect(ctx context.Context, dir string) (RepoReport, error) {
+// Inspect 扫描 dir 所在的仓库。opts 决定怎么查 worktree 是不是还在用。
+func Inspect(ctx context.Context, dir string, opts Options) (RepoReport, error) {
+	t := msg.For(opts.Lang)
 	wts, err := gitx.Worktrees(ctx, dir)
 	if err != nil {
-		return RepoReport{}, fmt.Errorf("列 worktree：%w", err)
+		return RepoReport{}, fmt.Errorf(t.ListWorktrees, err)
 	}
 	if len(wts) == 0 {
-		return RepoReport{}, fmt.Errorf("%s 没有工作区", dir)
+		return RepoReport{}, fmt.Errorf(t.NoWorkTree, dir)
 	}
 	rep := RepoReport{Root: wts[0].Path}
 	if wts[0].Bare {
-		rep.Note = "裸仓库，跳过"
+		rep.Note = t.Bare
 		return rep, nil
 	}
 	root := rep.Root
 	common, err := gitx.Run(ctx, root, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return rep, fmt.Errorf("找 git 目录：%w", err)
+		return rep, fmt.Errorf(t.FindGitDir, err)
 	}
 	tmpObj, err := os.MkdirTemp("", "repo-tidy-obj-")
 	if err != nil {
-		return rep, fmt.Errorf("建临时对象目录：%w", err)
+		return rep, fmt.Errorf(t.MakeTempObj, err)
 	}
 	defer os.RemoveAll(tmpObj)
 
@@ -89,33 +92,42 @@ func Inspect(ctx context.Context, dir string) (RepoReport, error) {
 		trees:    map[string]string{},
 		subjects: map[string]string{},
 		defPIDs:  map[string]map[string]string{},
+		opts:     opts,
+		t:        t,
+		now:      time.Now(),
+	}
+	if len(wts) > 1 { // 有附加 worktree 才要查进程
+		list := opts.Procs
+		if list == nil {
+			list = ListProcs
+		}
+		c.procs, c.procErr = list(ctx)
 	}
 	branches, err := c.localBranches()
 	if err != nil {
 		return rep, err
 	}
-	c.def = defaultBranch(ctx, root, branches)
+	c.def, c.defRef, c.defTip = defaultBranch(ctx, root, branches)
 	rep.DefaultBranch = c.def
 	if c.def == "" {
-		rep.Note = "找不到默认分支（origin/HEAD、main、master 都没有），只列出不判定"
+		rep.Note = t.NoDefault
 	} else {
-		c.defTip = branches[c.def].sha
 		if c.remotes, err = gitx.Run(ctx, root, "remote"); err != nil {
-			return rep, fmt.Errorf("列远程：%w", err)
+			return rep, fmt.Errorf(t.ListRemotes, err)
 		}
 	}
 
 	proofs := map[string]proof{} // 按分支名缓存
 	statusOf := func(sha, branch string) proof {
 		if c.def == "" {
-			return proof{basis: Keep, reasons: []string{"没有默认分支可比对"}}
+			return proof{basis: Keep, reasons: []string{t.NoDefaultToComp}}
 		}
 		if p, ok := proofs[branch]; ok && branch != "" {
 			return p
 		}
 		p, err := c.commitStatus(sha, branch)
 		if err != nil {
-			p = proof{basis: Keep, reasons: []string{"检查出错，保守留着：" + err.Error()}}
+			p = proof{basis: Keep, reasons: []string{fmt.Sprintf(t.CheckFailed, err)}}
 		}
 		if branch != "" {
 			proofs[branch] = p
@@ -125,15 +137,16 @@ func Inspect(ctx context.Context, dir string) (RepoReport, error) {
 
 	checkedOut := map[string]Item{} // 分支名 → 检出它的附加 worktree
 	mainBranch := wts[0].Branch
-	for _, w := range wts[1:] {
-		it := c.worktreeItem(w, statusOf)
+	checks := c.checkWorktrees(wts[1:])
+	for i, w := range wts[1:] {
+		it := c.worktreeItem(checks[i], statusOf)
 		rep.Worktrees = append(rep.Worktrees, it)
 		if w.Branch != "" {
 			checkedOut[w.Branch] = it
 		}
 	}
 	for _, name := range c.branchOrder {
-		if name == c.def {
+		if "refs/heads/"+name == c.defRef {
 			continue
 		}
 		b := branches[name]
@@ -142,9 +155,9 @@ func Inspect(ctx context.Context, dir string) (RepoReport, error) {
 		wt, hasWT := checkedOut[name]
 		switch {
 		case name == mainBranch:
-			it.Basis, it.Reasons = Keep, []string{"主工作区当前检出的分支"}
+			it.Basis, it.Reasons = Keep, []string{t.MainBranch}
 		case hasWT && !wt.Removable:
-			it.Basis, it.Reasons = Keep, []string{"在留着的 worktree 里检出：" + relTo(root, wt.Name)}
+			it.Basis, it.Reasons = Keep, []string{fmt.Sprintf(t.InKeptWorktree, relTo(root, wt.Name))}
 			if p.basis == Keep {
 				it.Reasons = append(it.Reasons, p.reasons...)
 				it.Unmerged = p.unmerged
@@ -152,7 +165,8 @@ func Inspect(ctx context.Context, dir string) (RepoReport, error) {
 		default:
 			it.apply(p)
 			if it.Removable && hasWT {
-				it.Evidence += "；先删检出它的 worktree"
+				it.Evidence += t.EvRemoveWTFirst
+				it.Short += t.EvRemoveWTFirst
 			}
 		}
 		rep.Branches = append(rep.Branches, it)
@@ -163,6 +177,7 @@ func Inspect(ctx context.Context, dir string) (RepoReport, error) {
 type proof struct {
 	basis     Basis
 	evidence  string
+	short     string
 	reasons   []string
 	remote    string
 	remoteRef string
@@ -172,7 +187,7 @@ type proof struct {
 func (it *Item) apply(p proof) {
 	it.Basis = p.basis
 	it.Removable = p.basis == Merged || p.basis == Pushed
-	it.Evidence = p.evidence
+	it.Evidence, it.Short = p.evidence, p.short
 	it.Reasons = append(it.Reasons, p.reasons...)
 	it.Remote, it.RemoteRef = p.remote, p.remoteRef
 	it.Unmerged = p.unmerged
@@ -184,17 +199,23 @@ type branchRef struct {
 }
 
 type checker struct {
-	ctx         context.Context
-	root        string
-	def         string
-	defTip      string
-	remotes     string
-	objEnv      []string
-	branchOrder []string
-	fpChain     []string                     // 默认分支第一父链，旧 → 新
-	trees       map[string]string            // 提交 → 树
-	subjects    map[string]string            // 提交 → 标题
-	defPIDs     map[string]map[string]string // 合并基点 → (patch-id → 默认分支提交)
+	ctx          context.Context
+	root         string
+	def          string // 默认分支的显示名：main，或远程跟踪引用 origin/main
+	defRef       string // 默认分支的完整引用：refs/heads/main 或 refs/remotes/origin/main
+	defTip       string
+	remotes      string
+	objEnv       []string
+	branchOrder  []string
+	introducedBy map[string]string            // 默认分支上的提交 → 第一父链上最早包含它的提交
+	trees        map[string]string            // 提交 → 树
+	subjects     map[string]string            // 提交 → 标题
+	defPIDs      map[string]map[string]string // 合并基点 → (patch-id → 默认分支提交)
+	opts         Options
+	t            *msg.Text
+	now          time.Time
+	procs        []Proc // 进程和工作目录，查 worktree 是不是在用
+	procErr      error  // 没查成进程时的错误
 }
 
 func (c *checker) git(args ...string) (string, error) { return gitx.Run(c.ctx, c.root, args...) }
@@ -202,7 +223,7 @@ func (c *checker) git(args ...string) (string, error) { return gitx.Run(c.ctx, c
 func (c *checker) localBranches() (map[string]branchRef, error) {
 	out, err := c.git("for-each-ref", "--format=%(refname)%00%(objectname)%00%(committerdate:unix)", "refs/heads")
 	if err != nil {
-		return nil, fmt.Errorf("列本地分支：%w", err)
+		return nil, fmt.Errorf(c.t.ListBranches, err)
 	}
 	m := map[string]branchRef{}
 	for _, l := range gitx.Lines(out) {
@@ -218,20 +239,30 @@ func (c *checker) localBranches() (map[string]branchRef, error) {
 	return m, nil
 }
 
-// defaultBranch：origin/HEAD 指向的分支本地也有就用它，否则 main、master。
-func defaultBranch(ctx context.Context, root string, branches map[string]branchRef) string {
-	if ref, err := gitx.Run(ctx, root, "symbolic-ref", "-q", "refs/remotes/origin/HEAD"); err == nil {
-		name := strings.TrimPrefix(ref, "refs/remotes/origin/")
-		if _, ok := branches[name]; ok {
-			return name
+// defaultBranch 返回默认分支的显示名、完整引用和末端提交；找不到时都为空。
+// 本地分支优先：origin/HEAD 指向的、main、master；本地都没有时依次用远程跟踪引用
+// origin/HEAD 指向的、origin/main、origin/master。
+func defaultBranch(ctx context.Context, root string, branches map[string]branchRef) (name, ref, sha string) {
+	var head string
+	if r, err := gitx.Run(ctx, root, "symbolic-ref", "-q", "refs/remotes/origin/HEAD"); err == nil {
+		head = strings.TrimPrefix(r, "refs/remotes/origin/")
+	}
+	cands := []string{head, "main", "master"}
+	for _, n := range cands {
+		if b, ok := branches[n]; ok && n != "" {
+			return n, "refs/heads/" + n, b.sha
 		}
 	}
-	for _, n := range []string{"main", "master"} {
-		if _, ok := branches[n]; ok {
-			return n
+	for _, n := range cands {
+		if n == "" {
+			continue
+		}
+		ref := "refs/remotes/origin/" + n
+		if sha, err := gitx.Run(ctx, root, "rev-parse", "--verify", "-q", ref+"^{commit}"); err == nil {
+			return "origin/" + n, ref, sha
 		}
 	}
-	return ""
+	return "", "", ""
 }
 
 func (c *checker) isAncestor(a, b string) (bool, error) {
@@ -252,7 +283,7 @@ func short(sha string) string {
 	return sha
 }
 
-// describe 返回「提交号「标题」」。
+// describe 返回提交号加标题，如「3702a43d「合并 导出 CSV」」。
 func (c *checker) describe(sha string) string {
 	s, ok := c.subjects[sha]
 	if !ok {
@@ -265,7 +296,7 @@ func (c *checker) describe(sha string) string {
 	if s == "" {
 		return short(sha)
 	}
-	return short(sha) + "「" + s + "」"
+	return fmt.Sprintf(c.t.Quoted, short(sha), s)
 }
 
 // firstTrue 在 xs 上二分，找第一个 pred 为真的位置；调用方保证最后一个为真。
@@ -287,15 +318,46 @@ func firstTrue(xs []string, pred func(string) (bool, error)) (string, error) {
 	return xs[lo], nil
 }
 
-func (c *checker) firstParentChain() ([]string, error) {
-	if c.fpChain == nil {
-		out, err := c.git("rev-list", "--first-parent", "--reverse", "refs/heads/"+c.def)
+// firstContaining 返回默认分支第一父链上最早包含 tip 的提交（tip 是默认分支末端的祖先）。
+// 第一次调用时读一遍默认分支的提交图，算出每个提交是第一父链上哪个提交带进来的；
+// 之后每个分支查表，不用逐个分支在链上二分、跑十几次 merge-base。
+func (c *checker) firstContaining(tip string) (string, error) {
+	if c.introducedBy == nil {
+		out, err := c.git("rev-list", "--first-parent", "--reverse", c.defRef)
 		if err != nil {
-			return nil, fmt.Errorf("列默认分支历史：%w", err)
+			return "", fmt.Errorf(c.t.ListDefHistory, err)
 		}
-		c.fpChain = gitx.Lines(out)
+		chain := gitx.Lines(out)
+		out, err = c.git("rev-list", "--parents", c.defRef)
+		if err != nil {
+			return "", fmt.Errorf(c.t.ReadDefGraph, err)
+		}
+		parents := map[string][]string{}
+		for _, l := range gitx.Lines(out) {
+			f := strings.Fields(l)
+			parents[f[0]] = f[1:]
+		}
+		// 链从旧到新：链上第 k 个提交带进来的，是它的祖先里前面的链提交都没包含的那些
+		by := make(map[string]string, len(parents))
+		for _, x := range chain {
+			stack := []string{x}
+			for len(stack) > 0 {
+				y := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if _, done := by[y]; done {
+					continue
+				}
+				by[y] = x
+				stack = append(stack, parents[y]...)
+			}
+		}
+		c.introducedBy = by
 	}
-	return c.fpChain, nil
+	at, ok := c.introducedBy[tip]
+	if !ok {
+		return "", fmt.Errorf(c.t.NotInHistory, short(tip), c.def)
+	}
+	return at, nil
 }
 
 func (c *checker) tree(sha string) (string, error) {
@@ -333,7 +395,7 @@ func (c *checker) patchIDs(input string) (map[string]string, []string, error) {
 	}
 	out, _, err := gitx.Exec(c.ctx, c.root, gitx.Opts{Stdin: input}, "patch-id", "--stable")
 	if err != nil {
-		return nil, nil, fmt.Errorf("算 patch-id：%w", err)
+		return nil, nil, fmt.Errorf(c.t.PatchID, err)
 	}
 	m := map[string]string{}
 	var order []string
@@ -352,9 +414,9 @@ func (c *checker) defPatchIDs(mb string) (map[string]string, error) {
 	if m, ok := c.defPIDs[mb]; ok {
 		return m, nil
 	}
-	log, err := c.git("log", "--no-merges", "--no-color", "--no-ext-diff", "-p", "--format=commit %H", "--max-count=2000", mb+"..refs/heads/"+c.def)
+	log, err := c.git("log", "--no-merges", "--no-color", "--no-ext-diff", "-p", "--format=commit %H", "--max-count=2000", mb+".."+c.defRef)
 	if err != nil {
-		return nil, fmt.Errorf("读默认分支改动：%w", err)
+		return nil, fmt.Errorf(c.t.ReadDefChanges, err)
 	}
 	m, _, err := c.patchIDs(log + "\n")
 	if err != nil {
@@ -377,28 +439,28 @@ func (c *checker) commitStatus(tip, branch string) (proof, error) {
 }
 
 func (c *checker) mergedProof(tip string) (proof, bool, error) {
-	def := c.def
-	merged := func(ev string) (proof, bool, error) { return proof{basis: Merged, evidence: ev}, true, nil }
+	def, t := c.def, c.t
+	// merged 用长、短两种说法写证据：长的带提交标题，短的只带提交号
+	merged := func(long, brief, at, describe string) (proof, bool, error) {
+		p := proof{basis: Merged, evidence: fmt.Sprintf(long, def, describe), short: fmt.Sprintf(brief, def, short(at))}
+		return p, true, nil
+	}
 	if tip == c.defTip {
-		return merged(fmt.Sprintf("和 %s 指向同一个提交 %s", def, short(tip)))
+		return merged(t.EvSame, t.EvSameShort, tip, short(tip))
 	}
 	anc, err := c.isAncestor(tip, c.defTip)
 	if err != nil {
 		return proof{}, false, err
 	}
 	if anc {
-		chain, err := c.firstParentChain()
-		if err != nil {
-			return proof{}, false, err
-		}
-		at, err := firstTrue(chain, func(x string) (bool, error) { return c.isAncestor(tip, x) })
+		at, err := c.firstContaining(tip)
 		if err != nil {
 			return proof{}, false, err
 		}
 		if at == tip {
-			return merged(fmt.Sprintf("已在 %s 上：提交 %s", def, c.describe(at)))
+			return merged(t.EvOnDef, t.EvOnDefShort, at, c.describe(at))
 		}
-		return merged(fmt.Sprintf("已合并进 %s：提交 %s", def, c.describe(at)))
+		return merged(t.EvMerged, t.EvMergedShort, at, c.describe(at))
 	}
 
 	mb, code, err := gitx.Exec(c.ctx, c.root, gitx.Opts{}, "merge-base", c.defTip, tip)
@@ -417,19 +479,19 @@ func (c *checker) mergedProof(tip string) (proof, bool, error) {
 	// squash：整段改动的 patch-id 等于默认分支上某个提交
 	diff, err := c.git("diff", "--no-color", "--no-ext-diff", mb, tip)
 	if err != nil {
-		return proof{}, false, fmt.Errorf("读分支改动：%w", err)
+		return proof{}, false, fmt.Errorf(t.ReadBranchChanges, err)
 	}
 	if _, order, err := c.patchIDs(diff + "\n"); err != nil {
 		return proof{}, false, err
 	} else if len(order) == 1 {
 		if at, ok := defPIDs[order[0]]; ok {
-			return merged(fmt.Sprintf("内容已 squash 进 %s：提交 %s", def, c.describe(at)))
+			return merged(t.EvSquash, t.EvSquashShort, at, c.describe(at))
 		}
 	}
 	// rebase：分支上每个提交在默认分支上都有同 patch-id 的提交
 	blog, err := c.git("log", "--no-merges", "--no-color", "--no-ext-diff", "-p", "--format=commit %H", mb+".."+tip)
 	if err != nil {
-		return proof{}, false, fmt.Errorf("读分支提交：%w", err)
+		return proof{}, false, fmt.Errorf(t.ReadBranchCommits, err)
 	}
 	if _, order, err := c.patchIDs(blog + "\n"); err != nil {
 		return proof{}, false, err
@@ -444,11 +506,11 @@ func (c *checker) mergedProof(tip string) (proof, bool, error) {
 			hits = append(hits, at)
 		}
 		if hits != nil {
-			ev := fmt.Sprintf("提交都已 rebase 进 %s：%s", def, c.describe(hits[0]))
+			d := c.describe(hits[0])
 			if len(hits) > 1 {
-				ev += fmt.Sprintf(" 等 %d 个", len(hits))
+				d += fmt.Sprintf(t.AndTotal, len(hits))
 			}
-			return merged(ev)
+			return merged(t.EvRebase, t.EvRebaseShort, hits[0], d)
 		}
 	}
 	// 模拟合并不增加内容：覆盖 squash 后默认分支又改过、分几次合并等情况
@@ -456,26 +518,27 @@ func (c *checker) mergedProof(tip string) (proof, bool, error) {
 	if err != nil || !ok {
 		return proof{}, false, err
 	}
-	out, err := c.git("rev-list", "--first-parent", "--reverse", mb+"..refs/heads/"+def)
+	out, err := c.git("rev-list", "--first-parent", "--reverse", mb+".."+c.defRef)
 	if err != nil {
 		return proof{}, false, err
 	}
 	chain := gitx.Lines(out)
 	if len(chain) == 0 {
-		return merged(fmt.Sprintf("相对 %s 没有净改动", def))
+		ev := fmt.Sprintf(t.EvNoNet, def)
+		return proof{basis: Merged, evidence: ev, short: ev}, true, nil
 	}
 	at, err := firstTrue(chain, func(x string) (bool, error) { return c.mergeAddsNothing(x, tip) })
 	if err != nil {
 		return proof{}, false, err
 	}
-	return merged(fmt.Sprintf("内容已全部在 %s 里：从提交 %s 起，合并它不再带来改动", def, c.describe(at)))
+	return merged(t.EvContent, t.EvContentShort, at, c.describe(at))
 }
 
 // pushedProof：某个远程跟踪引用包含 tip。优先和分支同名的引用。
 func (c *checker) pushedProof(tip, branch string) (proof, bool, error) {
 	out, err := c.git("for-each-ref", "--contains", tip, "--format=%(refname) %(objectname)", "refs/remotes")
 	if err != nil {
-		return proof{}, false, fmt.Errorf("查远程跟踪引用：%w", err)
+		return proof{}, false, fmt.Errorf(c.t.ListTracking, err)
 	}
 	var best, bestSHA string
 	for _, l := range gitx.Lines(out) {
@@ -495,8 +558,11 @@ func (c *checker) pushedProof(tip, branch string) (proof, bool, error) {
 		return proof{}, false, nil
 	}
 	remote, name := c.splitRemoteRef(best)
-	ev := fmt.Sprintf("已推到 %s/%s（本地记录的远程提交 %s 包含它）", remote, name, short(bestSHA))
-	return proof{basis: Pushed, evidence: ev, remote: remote, remoteRef: "refs/heads/" + name}, true, nil
+	return proof{
+		basis: Pushed, remote: remote, remoteRef: "refs/heads/" + name,
+		evidence: fmt.Sprintf(c.t.EvPushed, remote, name, short(bestSHA)),
+		short:    fmt.Sprintf(c.t.EvPushedShort, remote, name),
+	}, true, nil
 }
 
 // splitRemoteRef 把 refs/remotes/<远程>/<分支> 拆开；远程名可能带斜杠，取最长匹配。
@@ -515,13 +581,13 @@ func (c *checker) splitRemoteRef(ref string) (string, string) {
 }
 
 func (c *checker) unmergedReason(tip string) (proof, error) {
-	not := []string{tip, "--not", "refs/heads/" + c.def, "--remotes"}
+	not := []string{tip, "--not", c.defRef, "--remotes"}
 	n, err := c.git(append([]string{"rev-list", "--count"}, not...)...)
 	if err != nil {
-		return proof{}, fmt.Errorf("数独有提交：%w", err)
+		return proof{}, fmt.Errorf(c.t.CountUnique, err)
 	}
 	if n == "0" {
-		return proof{basis: Keep, unmerged: true, reasons: []string{fmt.Sprintf("内容不在 %s 里，也没有哪个远程引用完整包含它", c.def)}}, nil
+		return proof{basis: Keep, unmerged: true, reasons: []string{fmt.Sprintf(c.t.NotContained, c.def)}}, nil
 	}
 	out, err := c.git(append([]string{"log", "--format=%H", "--max-count=3"}, not...)...)
 	if err != nil {
@@ -531,8 +597,9 @@ func (c *checker) unmergedReason(tip string) (proof, error) {
 	for _, sha := range gitx.Lines(out) {
 		ds = append(ds, c.describe(sha))
 	}
-	r := fmt.Sprintf("有 %s 个提交既不在 %s 也没推到任何远程：%s", n, c.def, strings.Join(ds, "；"))
-	if nn, _ := strconv.Atoi(n); nn > len(ds) {
+	nn, _ := strconv.Atoi(n)
+	r := fmt.Sprintf(c.t.NotOnDefault, c.t.UniqueCommits.N(nn), c.def, strings.Join(ds, c.t.ReasonSep))
+	if nn > len(ds) {
 		r += "…"
 	}
 	return proof{basis: Keep, unmerged: true, reasons: []string{r}}, nil

@@ -3,6 +3,7 @@ package apply
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,12 +44,12 @@ func hasBranch(t *testing.T, dir, name string) bool {
 func run(t *testing.T, dir string) (judge.RepoReport, []Result, string) {
 	t.Helper()
 	ctx := context.Background()
-	rep, err := judge.Inspect(ctx, dir)
+	rep, err := judge.Inspect(ctx, dir, judge.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var log bytes.Buffer
-	res, err := Apply(ctx, rep, &log)
+	res, err := Apply(ctx, rep, judge.Options{}, &log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +211,7 @@ func TestApplySkipsWhenStateChanged(t *testing.T) {
 	f := newFixture(t)
 	f.g(t, "branch", "moved")
 	ctx := context.Background()
-	rep, err := judge.Inspect(ctx, f.dir)
+	rep, err := judge.Inspect(ctx, f.dir, judge.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +220,7 @@ func TestApplySkipsWhenStateChanged(t *testing.T) {
 	tr.Commit(t, f.dir, "n.txt", "n\n", "new work")
 	f.g(t, "switch", "-q", "main")
 
-	res, err := Apply(ctx, rep, &bytes.Buffer{})
+	res, err := Apply(ctx, rep, judge.Options{}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +229,46 @@ func TestApplySkipsWhenStateChanged(t *testing.T) {
 		t.Fatalf("状态变了不该删：%+v", r)
 	}
 	if !hasBranch(t, f.dir, "moved") {
+		t.Fatal("分支被删了")
+	}
+}
+
+// 报告时判可删，删之前才有进程进到 worktree 里：重新判定时现查进程，不删。
+func TestApplySkipsWorktreeThatBecameBusy(t *testing.T) {
+	f := newFixture(t)
+	wt := filepath.Join(f.wtRoot, "late")
+	f.g(t, "worktree", "add", "-q", "-b", "late", wt)
+	ctx := context.Background()
+	rep, err := judge.Inspect(ctx, f.dir, judge.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := byName(rep.Worktrees, wt); !w.Removable {
+		t.Fatalf("报告时应可删：%+v", w)
+	}
+
+	cmd := exec.Command("sleep", "60")
+	cmd.Dir = wt
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill() // 测试结束收掉 sleep
+		_ = cmd.Wait()
+	})
+
+	res, err := Apply(ctx, rep, judge.Options{}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := result(t, res, "late")
+	if r.Done || !strings.Contains(r.Msg, fmt.Sprintf("sleep（pid %d）", cmd.Process.Pid)) {
+		t.Fatalf("有进程在用的 worktree 不该删，原因要写出进程：%+v", r)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("worktree 目录被删了：%v", err)
+	}
+	if !hasBranch(t, f.dir, "late") {
 		t.Fatal("分支被删了")
 	}
 }

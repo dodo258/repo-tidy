@@ -3,8 +3,9 @@ import Observation
 
 /// 界面拿数据的地方。真实实现是 `CLI`；测试和截图用假的。
 public protocol Backend: Sendable {
-    func scan(root: String, online: Bool) async throws -> ScanResult
+    func scan(root: String, depth: Int, online: Bool, progress: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult
     func apply(_ items: [Item]) async throws -> ApplyOutcome
+    func undo(log: String) async throws -> UndoOutcome
 }
 
 extension CLI: Backend {}
@@ -22,14 +23,27 @@ public final class Store {
     public private(set) var noRepos = false
     public private(set) var error: String?
     public private(set) var scanning = false
+    /// 扫描中扫到第几个仓库；命令行还没报时为空。只在 `scanning` 时有意义。
+    public private(set) var progress: ScanProgress?
     public private(set) var missingCLI = false
     public private(set) var lastScan: Date?
     public private(set) var checked: Set<String> = []
+    /// 正在删除或撤销：这时不扫描、不能再清理。
     public private(set) var applying = false
     public var selectedRepoID: String?
-    /// 删除完的逐项结果，界面弹出来给人看；看完置空。
-    public var outcome: ApplyOutcome?
+    /// 删除完的逐项结果，界面弹出来给人看；看完置空（连同撤销的结果）。
+    public var outcome: ApplyOutcome? {
+        didSet {
+            if outcome == nil {
+                undoOutcome = nil
+                undoError = nil
+            }
+        }
+    }
     public var applyError: String?
+    /// 撤销这次清理的逐项结果，显示在删除结果的弹窗里。
+    public private(set) var undoOutcome: UndoOutcome?
+    public private(set) var undoError: String?
 
     public var scanRoot: String {
         didSet { defaults.set(scanRoot, forKey: Keys.root) }
@@ -37,6 +51,11 @@ public final class Store {
     public var cliPath: String {
         didSet { defaults.set(cliPath, forKey: Keys.cli) }
     }
+    /// 给的是文件夹时往下找几层仓库，和命令行的 `--depth` 一样（1 到 4）。
+    public var scanDepth: Int {
+        didSet { defaults.set(scanDepth, forKey: Keys.depth) }
+    }
+    public static let depthRange = 1...4
 
     private let defaults: UserDefaults
     private let makeBackend: @MainActor (Store) -> Backend?
@@ -45,6 +64,7 @@ public final class Store {
     enum Keys {
         static let root = "scanRoot"
         static let cli = "cliPath"
+        static let depth = "scanDepth"
     }
 
     /// 默认扫 $REPO_TIDY_ROOT，没设就扫 ~/projects，和命令行一致。
@@ -55,12 +75,14 @@ public final class Store {
 
     public init(defaults: UserDefaults = .standard,
                 makeBackend: @escaping @MainActor (Store) -> Backend? = { store in
-                    CLI.locate(custom: store.cliPath).map(CLI.init(executable:))
+                    CLI.locate(custom: store.cliPath).map { CLI(executable: $0) }
                 }) {
         self.defaults = defaults
         self.makeBackend = makeBackend
         scanRoot = defaults.string(forKey: Keys.root) ?? Store.defaultRoot()
         cliPath = defaults.string(forKey: Keys.cli) ?? ""
+        let depth = defaults.integer(forKey: Keys.depth) // 没存过是 0
+        scanDepth = Store.depthRange.contains(depth) ? depth : Store.depthRange.lowerBound
     }
 
     // MARK: 读
@@ -98,11 +120,19 @@ public final class Store {
         }
         missingCLI = false
         scanning = true
+        progress = nil
         let root = (scanRoot as NSString).expandingTildeInPath
+        let depth = scanDepth
+        // 命令行在后台线程报进度，回主线程再改界面状态；扫完之后迟到的不要
+        let onProgress: @Sendable (ScanProgress) -> Void = { [weak self] p in
+            Task { @MainActor in
+                if let self, self.scanning { self.progress = p }
+            }
+        }
         scanTask = Task { [weak self] in
             let result: Result<ScanResult, Error>
             do {
-                result = .success(try await backend.scan(root: root, online: false))
+                result = .success(try await backend.scan(root: root, depth: depth, online: false, progress: onProgress))
             } catch {
                 result = .failure(error)
             }
@@ -112,6 +142,7 @@ public final class Store {
 
     private func finishScan(_ result: Result<ScanResult, Error>) {
         scanning = false
+        progress = nil
         lastScan = Date()
         switch result {
         case let .success(.report(r)):
@@ -183,6 +214,26 @@ public final class Store {
             checked = []
         } catch {
             applyError = error.localizedDescription
+        }
+        applying = false
+        refresh()
+    }
+
+    /// 能撤销：刚删过东西、有恢复日志、还没撤销过。
+    public var canUndo: Bool {
+        guard let o = outcome else { return false }
+        return o.deleted > 0 && !o.log.isEmpty && undoOutcome == nil
+    }
+
+    /// 撤销刚才那次清理：命令行按它的恢复日志把删掉的分支和 worktree 建回原处，然后重新扫描。
+    public func undoLastApply() async {
+        guard canUndo, let log = outcome?.log, !applying, let backend = makeBackend(self) else { return }
+        applying = true
+        undoError = nil
+        do {
+            undoOutcome = try await backend.undo(log: log)
+        } catch {
+            undoError = error.localizedDescription
         }
         applying = false
         refresh()

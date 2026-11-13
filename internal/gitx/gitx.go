@@ -40,7 +40,7 @@ func (e *Error) Error() string {
 	if msg == "" && e.Err != nil {
 		msg = e.Err.Error()
 	}
-	return fmt.Sprintf("git %s（在 %s）：%s", strings.Join(e.Args, " "), e.Dir, msg)
+	return fmt.Sprintf("git %s (in %s): %s", strings.Join(e.Args, " "), e.Dir, msg)
 }
 
 func (e *Error) Unwrap() error { return e.Err }
@@ -80,7 +80,7 @@ func Exec(ctx context.Context, dir string, o Opts, args ...string) (string, int,
 		code = ee.ExitCode()
 	}
 	if ctx.Err() != nil {
-		err = fmt.Errorf("超时（%s）：%w", timeout, ctx.Err())
+		err = fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
 	}
 	return stdout.String(), code, &Error{Dir: dir, Args: args, Code: code, Stderr: stderr.String(), Err: err}
 }

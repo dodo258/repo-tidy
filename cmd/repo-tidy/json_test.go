@@ -94,6 +94,8 @@ func TestJSONMatchesTextReport(t *testing.T) {
 	tr.Git(t, one, "worktree", "add", "-q", "-b", "clean-wt", filepath.Join(wts, "clean"))
 	tr.Git(t, one, "worktree", "add", "-q", "-b", "dirty-wt", filepath.Join(wts, "dirty"))
 	tr.Write(t, filepath.Join(wts, "dirty"), "new.txt", "x\n")
+	tr.Idle(t, filepath.Join(wts, "clean"))
+	tr.Idle(t, filepath.Join(wts, "dirty"))
 	two := filepath.Join(root, "two")
 	tr.Init(t, two)
 	tr.Git(t, two, "branch", "same")
@@ -186,6 +188,7 @@ func TestApplySelectJSON(t *testing.T) {
 	}
 	wt := filepath.Join(base, "wt-c")
 	tr.Git(t, repo, "worktree", "add", "-q", wt, "c")
+	tr.Idle(t, wt)
 
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"--json", repo}, &out, &errb); code != 0 {
@@ -296,4 +299,38 @@ func sorted(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// 刚建的 worktree 默认按「刚动过」留着，--min-idle 0 关掉这条后可删；参数不对报参数错。
+func TestMinIdleFlag(t *testing.T) {
+	tr.Isolate(t)
+	repo := filepath.Join(t.TempDir(), "one")
+	tr.Init(t, repo)
+	wt := filepath.Join(t.TempDir(), "fresh")
+	tr.Git(t, repo, "worktree", "add", "-q", "-b", "fresh", wt)
+
+	verdict := func(args ...string) jsonItem {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if code := run(context.Background(), append(args, "--json", repo), &out, &errb); code != 0 {
+			t.Fatalf("%v 退出码 %d：%s", args, code, errb.String())
+		}
+		var doc jsonOut
+		if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Repos[0].Worktrees[0]
+	}
+	if it := verdict(); it.Verdict != "keep" || !strings.Contains(strings.Join(it.Reasons, "|"), "分钟前刚动过，可能还在用") {
+		t.Fatalf("默认应按刚动过留着：%+v", it)
+	}
+	if it := verdict("--min-idle", "0"); it.Verdict != "removable" {
+		t.Fatalf("--min-idle 0 应可删：%+v", it)
+	}
+	for _, bad := range []string{"-5m", "abc"} {
+		var out, errb bytes.Buffer
+		if code := run(context.Background(), []string{"--min-idle", bad, repo}, &out, &errb); code != 2 {
+			t.Fatalf("--min-idle %s 应是参数错（2），实际 %d", bad, code)
+		}
+	}
 }

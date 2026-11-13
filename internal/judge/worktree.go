@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dodo258/repo-tidy/internal/gitx"
@@ -22,14 +23,43 @@ var regenerable = map[string]bool{
 	".gradle": true, "coverage": true, ".DS_Store": true,
 }
 
-// inProgress 是 git 目录里表示操作做到一半的文件。
+// inProgress 是 git 目录里表示操作做到一半的文件；name 为空的是「rebase 或 am」，按语言取。
 var inProgress = []struct{ file, name string }{
-	{"rebase-merge", "rebase"}, {"rebase-apply", "rebase 或 am"},
+	{"rebase-merge", "rebase"}, {"rebase-apply", ""},
 	{"MERGE_HEAD", "merge"}, {"CHERRY_PICK_HEAD", "cherry-pick"},
 	{"REVERT_HEAD", "revert"}, {"BISECT_LOG", "bisect"},
 }
 
-func (c *checker) worktreeItem(w gitx.Worktree, statusOf func(sha, branch string) proof) Item {
+// worktreeWorkers 是一个仓库里同时查几个 worktree 自己的目录（git status 等）。
+const worktreeWorkers = 8
+
+// wtCheck 是一个 worktree 自己目录里查到的情况，和提交判定无关。done 为真时 item 已是最终结论
+// （锁定、只剩登记、读不了），否则 reasons 是目录里查出的留着原因，还要再看提交判定。
+type wtCheck struct {
+	item    Item
+	done    bool
+	reasons []string
+	dirty   bool
+}
+
+// checkWorktrees 并行查每个 worktree 的目录（数量有上限），结果顺序和 wts 相同。
+// 只读 checker 里扫描前就定好的字段，不碰提交判定的缓存。
+func (c *checker) checkWorktrees(wts []gitx.Worktree) []wtCheck {
+	out := make([]wtCheck, len(wts))
+	sem := make(chan struct{}, worktreeWorkers)
+	var wg sync.WaitGroup
+	for i, w := range wts {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i] = c.checkWorktree(w)
+		})
+	}
+	wg.Wait()
+	return out
+}
+
+func (c *checker) checkWorktree(w gitx.Worktree) wtCheck {
 	it := Item{Kind: KindWorktree, Name: w.Path, Branch: w.Branch, Head: w.Head}
 	if t, err := c.git("log", "-1", "--format=%ct", w.Head); err == nil {
 		if sec, err := strconv.ParseInt(t, 10, 64); err == nil {
@@ -37,24 +67,24 @@ func (c *checker) worktreeItem(w gitx.Worktree, statusOf func(sha, branch string
 		}
 	}
 	if w.Locked {
-		reason := "已锁定"
+		reason := c.t.Locked
 		if w.LockReason != "" {
-			reason += "：" + w.LockReason
+			reason = fmt.Sprintf(c.t.LockedWhy, w.LockReason)
 		}
 		it.Basis, it.Reasons = Keep, []string{reason}
-		return it
+		return wtCheck{item: it, done: true}
 	}
 	if w.Prunable {
 		it.Basis, it.Removable = Prunable, true
-		it.Evidence = "目录已不存在，只清掉 git 里的登记"
-		return it
+		it.Evidence, it.Short = c.t.EvPrunable, c.t.EvPrunableShort
+		return wtCheck{item: it, done: true}
 	}
 
 	var reasons []string
 	gitDir, err := gitx.Run(c.ctx, w.Path, "rev-parse", "--absolute-git-dir")
 	if err != nil {
-		it.Basis, it.Reasons = Keep, []string{"读不了这个 worktree，保守留着：" + err.Error()}
-		return it
+		it.Basis, it.Reasons = Keep, []string{fmt.Sprintf(c.t.CantRead, err)}
+		return wtCheck{item: it, done: true}
 	}
 	// 多久没动：HEAD 提交时间、index 修改时间、reflog 最后一条的时间，取最新。
 	// reflog 文件本身的修改时间会被批量操作刷新，不可信，读记录里的时间戳。
@@ -63,19 +93,24 @@ func (c *checker) worktreeItem(w gitx.Worktree, statusOf func(sha, branch string
 			it.LastActive = t
 		}
 	}
+	reasons = append(reasons, c.busyReasons(w.Path, gitDir)...)
 	for _, op := range inProgress {
 		if _, err := os.Stat(filepath.Join(gitDir, op.file)); err == nil {
-			reasons = append(reasons, "有做到一半的 "+op.name)
+			name := op.name
+			if name == "" {
+				name = c.t.RebaseOrAm
+			}
+			reasons = append(reasons, fmt.Sprintf(c.t.InProgress, name))
 		}
 	}
 
 	dirty, ignored, err := worktreeStatus(c, w.Path)
 	if err != nil {
-		it.Basis, it.Reasons = Keep, []string{"读不了改动状态，保守留着：" + err.Error()}
-		return it
+		it.Basis, it.Reasons = Keep, []string{fmt.Sprintf(c.t.CantStatus, err)}
+		return wtCheck{item: it, done: true}
 	}
 	if len(dirty) > 0 {
-		reasons = append(reasons, fmt.Sprintf("有未提交改动或未跟踪文件 %d 个：%s", len(dirty), listFew(dirty)))
+		reasons = append(reasons, fmt.Sprintf(c.t.Dirty, len(dirty), c.t.List(dirty, 3)))
 	}
 	var keepIgnored []string
 	for _, p := range ignored {
@@ -84,16 +119,24 @@ func (c *checker) worktreeItem(w gitx.Worktree, statusOf func(sha, branch string
 		}
 	}
 	if len(keepIgnored) > 0 {
-		reasons = append(reasons, fmt.Sprintf("有被忽略、不能重新生成的文件（主工作区没有同样一份）：%s", listFew(keepIgnored)))
+		reasons = append(reasons, fmt.Sprintf(c.t.IgnoredKeep, c.t.List(keepIgnored, 3)))
 	}
+	return wtCheck{item: it, reasons: reasons, dirty: len(dirty) > 0}
+}
 
-	p := statusOf(w.Head, w.Branch)
-	if len(reasons) > 0 {
-		it.Basis, it.Reasons = Keep, reasons
+// worktreeItem 把目录里查到的情况和提交判定合成结论。
+func (c *checker) worktreeItem(chk wtCheck, statusOf func(sha, branch string) proof) Item {
+	it := chk.item
+	if chk.done {
+		return it
+	}
+	p := statusOf(it.Head, it.Branch)
+	if len(chk.reasons) > 0 {
+		it.Basis, it.Reasons = Keep, chk.reasons
 		if p.basis == Keep {
 			it.Reasons = append(it.Reasons, p.reasons...)
 		}
-		it.Unmerged = len(dirty) > 0 || p.unmerged
+		it.Unmerged = chk.dirty || p.unmerged
 		return it
 	}
 	it.apply(p)
@@ -188,14 +231,6 @@ func sameFile(a, b string) bool {
 		return false
 	}
 	return bytes.Equal(da, db)
-}
-
-func listFew(xs []string) string {
-	const n = 3
-	if len(xs) <= n {
-		return strings.Join(xs, "、")
-	}
-	return strings.Join(xs[:n], "、") + fmt.Sprintf(" 等 %d 个", len(xs))
 }
 
 func modTime(path string) time.Time {

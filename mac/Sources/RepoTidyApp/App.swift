@@ -19,8 +19,8 @@ struct RepoTidyApp: App {
         .defaultSize(width: 1100, height: 700)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("选择要扫描的文件夹…") { chooseFolder(store) }.keyboardShortcut("o")
-                Button("重新扫描") { store.refresh() }.keyboardShortcut("r")
+                Button(L.menuChooseFolder) { chooseFolder(store) }.keyboardShortcut("o")
+                Button(L.rescan) { store.refresh() }.keyboardShortcut("r")
                     .disabled(store.scanning || store.applying)
                 CleanCommand()
             }
@@ -44,7 +44,7 @@ struct CleanCommand: View {
     @FocusedValue(\.confirmClean) private var confirm
 
     var body: some View {
-        Button("清理勾选的项…") { confirm?() }
+        Button(L.menuCleanChecked) { confirm?() }
             .keyboardShortcut(.delete, modifiers: .command)
             .disabled(confirm == nil)
     }
@@ -56,24 +56,35 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var store = store
         Form {
-            LabeledContent("扫描的文件夹") {
+            LabeledContent(L.settingsFolder) {
                 HStack {
                     Text(Format.tildePath(store.scanRoot)).font(Theme.name).lineLimit(1).truncationMode(.middle)
-                    Button("选择…") { chooseFolder(store) }
+                    Button(L.choose) { chooseFolder(store) }
                 }
             }
-            LabeledContent("命令行工具") {
+            LabeledContent(L.settingsDepth) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Picker(L.settingsDepth, selection: $store.scanDepth) {
+                        ForEach(Array(Store.depthRange), id: \.self) { Text("\($0)").tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    Text(L.depthHint)
+                        .font(Theme.meta).foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent(L.settingsCLI) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        TextField("自动查找", text: $store.cliPath).font(Theme.name)
-                        Button("选择…") { chooseCLI(store) }
+                        TextField(L.cliPlaceholder, text: $store.cliPath).font(Theme.name)
+                        Button(L.choose) { chooseCLI(store) }
                     }
-                    Text(verbatim: "留空时依次找 ~/.local/bin、~/go/bin、/opt/homebrew/bin、/usr/local/bin、~/bin")
+                    Text(L.cliHint)
                         .font(Theme.meta).foregroundStyle(.secondary)
                 }
             }
         }
         .padding(20)
         .frame(width: 560)
+        .onChange(of: store.scanDepth) { store.refresh() }
     }
 }

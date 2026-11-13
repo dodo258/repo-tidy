@@ -3,15 +3,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dodo258/repo-tidy/internal/health"
+	"github.com/dodo258/repo-tidy/internal/msg"
 	"github.com/dodo258/repo-tidy/internal/report"
 	tr "github.com/dodo258/repo-tidy/internal/testrepo"
 )
+
+// TestMain 把语言固定成中文，原有测试按中文断言；测英文的用例自己 t.Setenv 或加 --lang。
+func TestMain(m *testing.M) {
+	os.Unsetenv("LC_MESSAGES")
+	os.Unsetenv("LANG")
+	os.Setenv("LC_ALL", "zh_CN.UTF-8")
+	os.Exit(m.Run())
+}
 
 func branches(t *testing.T, dir string) string {
 	t.Helper()
@@ -40,7 +50,7 @@ func TestReportThenApply(t *testing.T) {
 		t.Fatalf("报告模式退出码 %d：%s%s", code, out.String(), errb.String())
 	}
 	s := out.String()
-	for _, want := range []string{"只读报告，什么都没删", "2 个仓库", "内容已 squash 进 main", "有 1 个提交既不在 main 也没推到任何远程", "和 main 指向同一个提交", "加 --apply 删除标「可删」的 2 项"} {
+	for _, want := range []string{"只读报告，什么都没删", "2 个仓库", "squash 进 main ", "有 1 个提交既不在 main 也没推到任何远程", "等于 main ", "加 --apply 删除标「可删」的 2 项"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("报告缺 %q：\n%s", want, s)
 		}
@@ -98,10 +108,13 @@ func TestReportHasCheckupPerRepo(t *testing.T) {
 	if n := strings.Count(s, "\n  体检\n"); n != 2 {
 		t.Fatalf("每个仓库应有一段体检，实际 %d 段：\n%s", n, s)
 	}
-	for _, want := range []string{"占用      .git ", "主工作区  main，没设上游 · 1 个未提交改动 · 没有 stash", "最后提交  ", "backup    3 个本地分支里 1 个没推到最新（按本地记录", "没推  fresh", "backup    没有 backup 远程"} {
+	for _, want := range []string{"占用      .git ", "主工作区  main，没设上游 · 1 个未提交改动 · 没有 stash", "最后提交  ", "backup    3 个本地分支里 1 个没推到最新（按本地记录", "没推  fresh"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("报告缺 %q：\n%s", want, s)
 		}
+	}
+	if strings.Contains(s, "没有 backup 远程") {
+		t.Fatalf("没指定 --backup-remote 时，没有 backup 远程的仓库不该提：\n%s", s)
 	}
 
 	tr.Git(t, synced, "push", "-q", "backup", "fresh")
@@ -154,8 +167,11 @@ func TestOverviewAndMessOrder(t *testing.T) {
 	tr.Git(t, wild, "worktree", "add", "-q", "-b", "lk", lk)
 	tr.Git(t, wild, "worktree", "lock", lk)
 	tr.Git(t, wild, "branch", "old") // 可删分支
+	for _, w := range []string{w1, w2, lk} {
+		tr.Idle(t, w)
+	}
 
-	h, err := health.Inspect(context.Background(), wild, false)
+	h, err := health.Inspect(context.Background(), wild, health.Options{}, msg.ZH)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +194,7 @@ func TestOverviewAndMessOrder(t *testing.T) {
 		"总览  扫了 3 个仓库（1 个干净） · 附加 worktree 3 个 · 本地分支 6 个\n",
 		"可删 4 项（worktree 1、分支 3），能腾出 " + report.Bytes(w1Bytes) + "\n",
 		"留着 5 项（worktree 2、分支 3），其中 3 项有未合并内容\n",
-		"干净的仓库 1 个（没有可删项，也没有未合并的内容）：\n  " + calm + "  0 个附加 worktree · 0 个本地分支 · 注意：没有 backup 远程\n",
+		"干净的仓库 1 个（没有可删项，也没有未合并的内容）：\n  " + calm + "  0 个附加 worktree · 0 个本地分支\n",
 	} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("报告缺 %q：\n%s", want, s)
@@ -199,5 +215,140 @@ func TestOverviewAndMessOrder(t *testing.T) {
 	}
 	if os.Getenv("REPO_TIDY_SHOW") != "" {
 		t.Log("\n" + s)
+	}
+}
+
+// 可删项默认一行，行尾的短证据带提交号或远程引用；--verbose 恢复名字一行、证据一行。
+func TestCompactAndVerbose(t *testing.T) {
+	tr.Isolate(t)
+	root := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "backup.git")
+	tr.Git(t, root, "init", "-q", "--bare", "-b", "main", bare)
+	r := filepath.Join(root, "r")
+	tr.Init(t, r)
+	tr.Git(t, r, "remote", "add", "backup", bare)
+	tr.Git(t, r, "switch", "-q", "-c", "done")
+	tr.Commit(t, r, "d.txt", "d\n", "done work")
+	tr.Git(t, r, "switch", "-q", "main")
+	tr.Git(t, r, "merge", "-q", "--squash", "done")
+	tr.Git(t, r, "commit", "-q", "-m", "squash done")
+	squash := tr.Git(t, r, "rev-parse", "--short=8", "main")
+	tr.Git(t, r, "switch", "-q", "-c", "agent/x")
+	tr.Commit(t, r, "x.txt", "x\n", "pushed work")
+	tr.Git(t, r, "push", "-q", "backup", "agent/x")
+	tr.Git(t, r, "switch", "-q", "main")
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{r}, &out, &errb); code != 0 {
+		t.Fatalf("退出码 %d：%s%s", code, out.String(), errb.String())
+	}
+	s := out.String()
+	for _, want := range []string{"  done  今天动过  squash 进 main " + squash + "\n", "  agent/x  今天动过  已推 backup/agent/x\n"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("默认报告缺 %q：\n%s", want, s)
+		}
+	}
+	ls := strings.Split(s, "\n")
+	for i, l := range ls {
+		if strings.HasPrefix(l, "    可删  ") && strings.HasPrefix(ls[i+1], "          ") {
+			t.Fatalf("可删项默认不该另起一行写证据：\n%s", s)
+		}
+	}
+
+	out.Reset()
+	if code := run(context.Background(), []string{"--verbose", r}, &out, &errb); code != 0 {
+		t.Fatalf("--verbose 退出码 %d：%s%s", code, out.String(), errb.String())
+	}
+	s = out.String()
+	for _, want := range []string{
+		"    可删  done  今天动过\n          内容已 squash 进 main：提交 " + squash + "「squash done」\n",
+		"    可删  agent/x  今天动过\n          已推到 backup/agent/x（本地记录的远程提交 ",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("--verbose 报告缺 %q：\n%s", want, s)
+		}
+	}
+}
+
+// --backup-remote：默认比对 backup，仓库里没有就不提；自定义名字比对那个远程；
+// 显式指定（哪怕就是 backup）而仓库里没有，体检和干净仓库的行尾都要报；空名字是参数错。
+func TestBackupRemoteFlag(t *testing.T) {
+	tr.Isolate(t)
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	bare := filepath.Join(t.TempDir(), "mirror.git")
+	tr.Git(t, root, "init", "-q", "--bare", "-b", "main", bare)
+	plain := filepath.Join(root, "a-plain") // 干净，没有任何远程
+	tr.Init(t, plain)
+	mirrored := filepath.Join(root, "b-other") // 有 mirror 远程，fresh 没推；extra 可删，体检段展开
+	tr.Init(t, mirrored)
+	tr.Git(t, mirrored, "remote", "add", "mirror", bare)
+	tr.Git(t, mirrored, "push", "-q", "mirror", "main")
+	tr.Git(t, mirrored, "branch", "extra")
+	tr.Git(t, mirrored, "switch", "-q", "-c", "fresh")
+	tr.Commit(t, mirrored, "f.txt", "f\n", "fresh work")
+	tr.Git(t, mirrored, "switch", "-q", "main")
+
+	text := func(args ...string) string {
+		t.Helper()
+		var out, errb bytes.Buffer
+		if code := run(context.Background(), append(args, root), &out, &errb); code != 0 {
+			t.Fatalf("%v 退出码 %d：%s%s", args, code, out.String(), errb.String())
+		}
+		return out.String()
+	}
+
+	s := text()
+	if strings.Contains(s, "backup") || strings.Contains(s, "mirror") || strings.Contains(s, "注意") {
+		t.Fatalf("默认（backup）两个仓库都没有，不该提备份远程：\n%s", s)
+	}
+	if !strings.Contains(s, "\n  "+plain+"  0 个附加 worktree · 0 个本地分支\n") {
+		t.Fatalf("干净仓库行尾不该多一句：\n%s", s)
+	}
+
+	s = text("--backup-remote", "backup")
+	for _, want := range []string{
+		"    backup    没有 backup 远程\n",
+		"\n  " + plain + "  0 个附加 worktree · 0 个本地分支 · 注意：没有 backup 远程\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("显式指定 backup 时缺 %q：\n%s", want, s)
+		}
+	}
+
+	s = text("--backup-remote", "mirror")
+	for _, want := range []string{
+		"    mirror    3 个本地分支里 2 个没推到最新（按本地记录",
+		"没推  fresh",
+		"注意：没有 mirror 远程\n",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("--backup-remote mirror 时缺 %q：\n%s", want, s)
+		}
+	}
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"--json", plain}, &out, &errb); code != 0 {
+		t.Fatalf("--json 退出码 %d：%s", code, errb.String())
+	}
+	var doc struct {
+		Repos []struct {
+			Health struct {
+				Backup struct {
+					Remote   string `json:"remote"`
+					Required bool   `json:"required"`
+					Present  *bool  `json:"present"`
+				} `json:"backup"`
+			} `json:"health"`
+		} `json:"repos"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if b := doc.Repos[0].Health.Backup; b.Present == nil || *b.Present || b.Remote != "backup" || b.Required {
+		t.Fatalf("JSON 照旧给 present=false，并写出比对的远程：%+v", b)
+	}
+
+	if code := run(context.Background(), []string{"--backup-remote", "", plain}, &out, &errb); code != 2 {
+		t.Fatalf("空的 --backup-remote 应是参数错（2），实际 %d", code)
 	}
 }
