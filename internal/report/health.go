@@ -19,7 +19,7 @@ func checkup(w io.Writer, t *msg.Text, h health.Report, now time.Time) {
 	}
 	// 标签列宽：最长的标签再空两格
 	labelWidth := 0
-	for _, l := range []string{t.RowUsage, t.RowMain, t.RowLastCommit, h.Backup.Remote, t.RowNotChecked} {
+	for _, l := range []string{t.RowUsage, t.RowOrphans, t.RowMain, t.RowLastCommit, h.Backup.Remote, t.RowNotChecked} {
 		labelWidth = max(labelWidth, width(l)+2)
 	}
 	row := func(label, text string) { fmt.Fprintf(w, "    %s%s\n", padTo(label, labelWidth), text) }
@@ -40,6 +40,10 @@ func checkup(w io.Writer, t *msg.Text, h health.Report, now time.Time) {
 		}
 	}
 	row(t.RowUsage, usage)
+	if n := len(h.Orphans); n > 0 {
+		row(t.RowOrphans, fmt.Sprintf(t.Orphans, n, Bytes(orphanBytes(h))))
+		orphanLines(t, h, func(text string) { row("", "  "+text) })
+	}
 
 	parts := []string{upstream(t, h)}
 	if h.Changes == 0 {
@@ -66,6 +70,25 @@ func checkup(w io.Writer, t *msg.Text, h health.Report, now time.Time) {
 	for _, e := range h.Errs {
 		row(t.RowNotChecked, e)
 	}
+}
+
+// orphanLines 逐个写孤儿目录：路径、大小、还有没有 .git 文件。
+func orphanLines(t *msg.Text, h health.Report, line func(text string)) {
+	for _, o := range h.Orphans {
+		state := t.OrphanNoGitFile
+		if o.HasGitFile {
+			state = t.OrphanGitFile
+		}
+		line(strings.Join([]string{shortPath(o.Path, h.Root, ""), Bytes(o.Bytes), state}, "  "))
+	}
+}
+
+func orphanBytes(h health.Report) int64 {
+	var total int64
+	for _, o := range h.Orphans {
+		total += o.Bytes
+	}
+	return total
 }
 
 func upstream(t *msg.Text, h health.Report) string {
@@ -170,6 +193,9 @@ func padTo(s string, w int) string {
 // attention 列出体检里值得注意的几项，给折叠成一行的干净仓库用。
 func attention(t *msg.Text, h health.Report) []string {
 	var out []string
+	if n := len(h.Orphans); n > 0 {
+		out = append(out, fmt.Sprintf(t.AttnOrphans, n, Bytes(orphanBytes(h))))
+	}
 	if h.Changes > 0 {
 		out = append(out, fmt.Sprintf(t.AttnChanges, h.Changes))
 	}

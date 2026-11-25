@@ -38,6 +38,8 @@ type jsonTotals struct {
 	Unmerged           int         `json:"unmerged"`
 	FreeBytes          int64       `json:"free_bytes"`
 	Unmeasured         int         `json:"unmeasured"`
+	Orphans            int         `json:"orphans"`
+	OrphanBytes        int64       `json:"orphan_bytes"`
 	Filter             *jsonFilter `json:"filter"`   // 没有筛选条件时为 null
 	Excluded           int         `json:"excluded"` // --exclude 跳过的仓库数，不算在 repos 里
 }
@@ -78,21 +80,28 @@ type jsonItem struct {
 }
 
 type jsonHealth struct {
-	Note             string     `json:"note"`
-	GitDirBytes      int64      `json:"git_dir_bytes"`
-	MainBytes        int64      `json:"main_bytes"`
-	Branch           string     `json:"branch"`
-	Upstream         string     `json:"upstream"`
-	UpstreamGone     bool       `json:"upstream_gone"`
-	Ahead            int        `json:"ahead"`
-	Behind           int        `json:"behind"`
-	Changes          int        `json:"changes"`
-	Untracked        int        `json:"untracked"`
-	Stashes          int        `json:"stashes"`
-	LastCommit       *time.Time `json:"last_commit"`
-	LastCommitBranch string     `json:"last_commit_branch"`
-	Backup           jsonBackup `json:"backup"`
-	Errors           []string   `json:"errors"`
+	Note             string       `json:"note"`
+	GitDirBytes      int64        `json:"git_dir_bytes"`
+	MainBytes        int64        `json:"main_bytes"`
+	Orphans          []jsonOrphan `json:"orphans"`
+	Branch           string       `json:"branch"`
+	Upstream         string       `json:"upstream"`
+	UpstreamGone     bool         `json:"upstream_gone"`
+	Ahead            int          `json:"ahead"`
+	Behind           int          `json:"behind"`
+	Changes          int          `json:"changes"`
+	Untracked        int          `json:"untracked"`
+	Stashes          int          `json:"stashes"`
+	LastCommit       *time.Time   `json:"last_commit"`
+	LastCommitBranch string       `json:"last_commit_branch"`
+	Backup           jsonBackup   `json:"backup"`
+	Errors           []string     `json:"errors"`
+}
+
+type jsonOrphan struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"size_bytes"`
+	HasGitFile bool   `json:"has_git_file"`
 }
 
 type jsonBackup struct {
@@ -123,7 +132,8 @@ func JSON(w io.Writer, reps []Repo, now time.Time, f Filter, excluded int) error
 		Summary: jsonTotals{
 			Repos: o.Repos, Failed: o.Failed, Clean: o.Clean, Worktrees: o.Worktrees, Branches: o.Branches,
 			RemovableWorktrees: o.RemovableWT, RemovableBranches: o.RemovableBr, KeepWorktrees: o.KeptWT, KeepBranches: o.KeptBr,
-			Unmerged: o.Unmerged, FreeBytes: o.FreeBytes, Unmeasured: o.Unmeasured, Excluded: excluded,
+			Unmerged: o.Unmerged, FreeBytes: o.FreeBytes, Unmeasured: o.Unmeasured,
+			Orphans: o.Orphans, OrphanBytes: o.OrphanBytes, Excluded: excluded,
 		},
 	}
 	if f.On() {
@@ -167,7 +177,7 @@ func itemsJSON(root string, items []judge.Item, sizes map[string]health.Size) []
 
 func healthJSON(h health.Report) *jsonHealth {
 	jh := &jsonHealth{
-		Note: h.Note, GitDirBytes: h.GitDir.Bytes, MainBytes: h.Main.Bytes,
+		Note: h.Note, GitDirBytes: h.GitDir.Bytes, MainBytes: h.Main.Bytes, Orphans: []jsonOrphan{},
 		Branch: h.Branch, Upstream: h.Upstream, UpstreamGone: h.UpstreamGone, Ahead: h.Ahead, Behind: h.Behind,
 		Changes: h.Changes, Untracked: h.Untracked, Stashes: h.Stashes,
 		LastCommit: timeOrNil(h.LastCommit), LastCommitBranch: h.LastCommitBranch,
@@ -176,6 +186,9 @@ func healthJSON(h health.Report) *jsonHealth {
 			Checked: h.Backup.Checked, Stale: []jsonBranchSync{},
 		},
 		Errors: append([]string{}, h.Errs...),
+	}
+	for _, o := range h.Orphans {
+		jh.Orphans = append(jh.Orphans, jsonOrphan{Path: o.Path, SizeBytes: o.Bytes, HasGitFile: o.HasGitFile})
 	}
 	for _, s := range h.Backup.Stale {
 		jh.Backup.Stale = append(jh.Backup.Stale, jsonBranchSync{

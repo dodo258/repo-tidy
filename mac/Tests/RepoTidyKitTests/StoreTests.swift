@@ -247,3 +247,38 @@ func settle(_ s: Store) async {
     for _ in 0..<200 where s.scanning { try await Task.sleep(for: .milliseconds(10)) }
     #expect(fake.depths == [2, 4] && s.screen == .empty(depth: 4))
 }
+
+@MainActor @Test func keptItemsPointAtTheirFolder() async throws {
+    var r = try decodeSample()
+    // 一个检出在留着的 worktree 里的分支，一个主工作区当前检出的分支
+    r.repos[0].worktrees[1].branch = "agent/kept"
+    var inWorktree = r.repos[0].branches[1], inMain = inWorktree
+    inWorktree.name = "agent/kept"
+    inMain.name = "feature"
+    r.repos[0].branches += [inWorktree, inMain]
+    r.repos[0].health?.branch = "feature"
+    let s = makeStore(FakeBackend(.success(.report(r))))
+    s.refresh()
+    await settle(s)
+    let app = try #require(s.selectedRepo)
+    #expect(app.worktrees.map(s.folder(of:)) == [nil, "/tmp/elsewhere"]) // 可删的不给
+    // 可删的、没检出在任何地方的、在 worktree 里的、在主工作区的
+    #expect(app.branches.map(s.folder(of:)) == [nil, nil, "/tmp/elsewhere", "/p/app"])
+    // 没有体检结果的仓库（health 为空）：不知道主工作区检出了什么，不给
+    #expect(s.folder(of: s.repos[2].branches[0]) == nil)
+}
+
+@MainActor @Test func openingAMissingFolderSaysWhy() throws {
+    let s = makeStore(nil)
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("repo-tidy-test-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    #expect(s.canOpen(folder: dir.path) && s.openError == nil)
+    let gone = dir.path + "/gone"
+    #expect(!s.canOpen(folder: gone))
+    #expect(s.openError?.contains(gone) == true)
+    // 同一个路径换成了文件：不能当文件夹打开（交给终端会被当脚本跑）
+    s.openError = nil
+    try Data("#!/bin/sh\n".utf8).write(to: URL(fileURLWithPath: gone))
+    #expect(!s.canOpen(folder: gone) && s.openError != nil)
+}

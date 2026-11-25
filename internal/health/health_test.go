@@ -226,6 +226,33 @@ func TestWorkdirUpstreamAndLastCommit(t *testing.T) {
 	}
 }
 
+// 有同名标签时 git 的短名会带上 heads/，当前分支、上游、最近提交的分支、backup 比对都不能跟着错。
+func TestBranchNameWithSameNamedTag(t *testing.T) {
+	tr.Isolate(t)
+	base := t.TempDir()
+	dir, bare := filepath.Join(base, "repo"), filepath.Join(base, "backup.git")
+	tr.Git(t, base, "init", "-q", "--bare", "-b", "main", bare)
+	tr.Init(t, dir)
+	g := func(args ...string) { t.Helper(); tr.Git(t, dir, args...) }
+	g("remote", "add", "backup", bare)
+	g("push", "-q", "backup", "main")
+	g("switch", "-q", "-c", "feat/x")
+	tr.Commit(t, dir, "x.txt", "x\n", "x")
+	g("push", "-q", "-u", "backup", "feat/x")
+	g("branch", "-D", "main") // 只剩一个分支，最近提交的分支没有歧义
+	g("tag", "feat/x")
+	r := inspect(t, dir, false)
+	if r.Branch != "feat/x" || r.Upstream != "backup/feat/x" {
+		t.Errorf("当前分支 %q 上游 %q", r.Branch, r.Upstream)
+	}
+	if r.LastCommitBranch != "feat/x" {
+		t.Errorf("最近提交的分支 %q", r.LastCommitBranch)
+	}
+	if got := stale(r); got != "" {
+		t.Errorf("已经推到 backup，不该报没推到最新：%s", got)
+	}
+}
+
 func TestSizes(t *testing.T) {
 	tr.Isolate(t)
 	base := t.TempDir()

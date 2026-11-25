@@ -68,6 +68,10 @@ public struct Strings: Sendable {
     // MARK: 仓库详情
     public let repoFailedNotice: Fmt1<String>
     public let showInFinder: String
+    public let openInTerminal: String
+    public let openInTerminalHelp: String
+    public let openFailedTitle: String
+    public let folderGone: Fmt1<String>
     public let defaultBranch: Fmt1<String>
     public let sectionWorktrees: String
     public let noWorktrees: String
@@ -266,6 +270,10 @@ extension Strings {
 
         repoFailedNotice: .init { "这个仓库没扫成：\($0)" },
         showInFinder: "在 Finder 中显示",
+        openInTerminal: "在终端打开",
+        openInTerminalHelp: "用系统默认的终端打开这个文件夹",
+        openFailedTitle: "打不开",
+        folderGone: .init { "\($0) 这个文件夹不在了，可能被删掉或移走了。重新扫描看现在的情况" },
         defaultBranch: .init { "默认分支 \($0)" },
         sectionWorktrees: "Worktree",
         noWorktrees: "没有附加 worktree",
@@ -436,6 +444,10 @@ extension Strings {
 
         repoFailedNotice: .init { "Couldn't scan this repository: \($0)" },
         showInFinder: "Show in Finder",
+        openInTerminal: "Open in Terminal",
+        openInTerminalHelp: "Open this folder in your default terminal app",
+        openFailedTitle: "Couldn’t Open",
+        folderGone: .init { "The folder \($0) is gone. It may have been deleted or moved. Rescan to see what’s there now." },
         defaultBranch: .init { "default branch \($0)" },
         sectionWorktrees: "Worktrees",
         noWorktrees: "No linked worktrees",

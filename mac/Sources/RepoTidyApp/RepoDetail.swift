@@ -72,11 +72,9 @@ struct RepoDetail: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(repo.name).font(Theme.repoTitle)
                 Spacer()
-                Button(L.showInFinder) {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: repo.root)])
-                }
-                .buttonStyle(.link)
-                .font(Theme.note)
+                Button(L.showInFinder) { showInFinder(folder: repo.root, store) }
+                    .buttonStyle(.link)
+                    .font(Theme.note)
             }
             Text(pathLine).font(Theme.note).foregroundStyle(.secondary).textSelection(.enabled)
             if let h = repo.health, h.note.isEmpty {
@@ -187,10 +185,33 @@ struct ItemRow: View {
                             .frame(minWidth: 56, alignment: .trailing)
                     }
                 }
-                Verdict(item: item)
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Verdict(item: item)
+                    if let folder = store.folder(of: item) {
+                        Spacer(minLength: 0)
+                        FolderLinks(folder: folder)
+                    }
+                }
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// 留着的项右边的两个入口：去它的目录里看那些没提交的东西，再决定怎么处理。
+struct FolderLinks: View {
+    @Environment(Store.self) private var store
+    let folder: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(L.showInFinder) { showInFinder(folder: folder, store) }
+            Button(L.openInTerminal) { Task { await openInTerminal(folder: folder, store) } }
+                .help(L.openInTerminalHelp)
+        }
+        .buttonStyle(.link)
+        .font(Theme.meta)
+        .fixedSize()
     }
 }
 

@@ -19,6 +19,8 @@ type Overview struct {
 	Unmerged                 int   // 留着的项里有未合并内容的
 	FreeBytes                int64 // 可删 worktree 的目录大小之和
 	Unmeasured               int   // 可删 worktree 里没量到大小的个数
+	Orphans                  int   // .claude/worktrees 下的孤儿目录，不算在上面任何一项里
+	OrphanBytes              int64
 }
 
 // Removable 是可删项总数。
@@ -78,6 +80,10 @@ func Summarize(reps []Repo) Overview {
 		if clean(r) {
 			o.Clean++
 		}
+		if r.Health != nil {
+			o.Orphans += len(r.Health.Orphans)
+			o.OrphanBytes += orphanBytes(*r.Health)
+		}
 		o.Worktrees += len(r.Worktrees)
 		o.Branches += len(r.Branches)
 		sizes := worktreeSizes(r)
@@ -112,7 +118,7 @@ func Summarize(reps []Repo) Overview {
 	return o
 }
 
-// overview 输出报告开头的总览；--exclude 跳过了仓库、有筛选条件时各另起一行注明。
+// overview 输出报告开头的总览；有孤儿目录、--exclude 跳过了仓库、有筛选条件时各另起一行注明。
 func overview(w io.Writer, t *msg.Text, o Overview, f Filter, excluded int) {
 	scanned := t.OverviewScanned.N(o.Repos)
 	var notes []string
@@ -137,6 +143,9 @@ func overview(w io.Writer, t *msg.Text, o Overview, f Filter, excluded int) {
 		kept += fmt.Sprintf(t.KeptUnmerged, o.Unmerged)
 	}
 	fmt.Fprintln(w, kept)
+	if o.Orphans > 0 {
+		fmt.Fprintf(w, t.OrphansLine, o.Orphans, Bytes(o.OrphanBytes))
+	}
 	if excluded > 0 {
 		fmt.Fprint(w, t.ExcludedLine.N(excluded))
 	}

@@ -26,6 +26,11 @@ struct MainView: View {
         } message: {
             Text(store.applyError ?? "")
         }
+        .alert(L.openFailedTitle, isPresented: openErrorShown) {
+            Button(L.ok) { store.openError = nil }
+        } message: {
+            Text(store.openError ?? "")
+        }
         .focusedSceneValue(\.confirmClean, store.checked.isEmpty ? nil : { confirming = true })
     }
 
@@ -77,6 +82,10 @@ struct MainView: View {
 
     private var applyErrorShown: Binding<Bool> {
         Binding(get: { store.applyError != nil }, set: { if !$0 { store.applyError = nil } })
+    }
+
+    private var openErrorShown: Binding<Bool> {
+        Binding(get: { store.openError != nil }, set: { if !$0 { store.openError = nil } })
     }
 }
 

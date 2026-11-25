@@ -150,6 +150,7 @@ type Text struct {
 	RemovableLine   string
 	KeptLine        string
 	KeptUnmerged    string
+	OrphansLine     string
 	ExcludedLine    Count
 	FilterLine      string
 	FilterOlder     string
@@ -177,12 +178,16 @@ type Text struct {
 	// report：体检
 	Checkup         string
 	RowUsage        string
+	RowOrphans      string
 	RowMain         string
 	RowLastCommit   string
 	RowNotChecked   string
 	Usage1          string
 	UsageWorktrees  string
 	DirsGone        Count
+	Orphans         string
+	OrphanGitFile   string
+	OrphanNoGitFile string
 	NoUpstream      string
 	UpstreamGone    string
 	UpstreamSame    string
@@ -206,6 +211,7 @@ type Text struct {
 	StaleBehind     string
 	StaleDiverged   string
 	StaleUnknown    string
+	AttnOrphans     string
 	AttnChanges     string
 	AttnStashes     string
 	AttnUpstream    string
@@ -316,11 +322,11 @@ type Text struct {
 	UndoDidWorktree  string
 
 	// health
+	FindOrphans     string
 	MeasureGitDir   string
 	Measure         string
 	CheckChanges    string
 	CountStashes    string
-	FindBranch      string
 	FindUpstream    string
 	CompareUpstream string
 	FindLastCommit  string

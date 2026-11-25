@@ -48,6 +48,8 @@ public final class Store {
         }
     }
     public var applyError: String?
+    /// 打开目录没成的原因，界面弹出来给人看；看完置空。
+    public var openError: String?
     /// 撤销这次清理的逐项结果，显示在删除结果的弹窗里。
     public private(set) var undoOutcome: UndoOutcome?
     public private(set) var undoError: String?
@@ -245,6 +247,25 @@ public final class Store {
     public func worktreeFor(_ branch: Item) -> Item? {
         guard branch.kind == .branch else { return nil }
         return repos.first { $0.root == branch.repo }?.worktrees.first { $0.branch == branch.name }
+    }
+
+    // MARK: 去看目录
+
+    /// 留着的项在磁盘上的目录，给「在 Finder 中显示」「在终端打开」用：worktree 是它自己，
+    /// 分支是检出它的 worktree 或主工作区。可删的项、没检出在任何地方的分支没有。
+    public func folder(of item: Item) -> String? {
+        if item.isRemovable { return nil }
+        if item.kind == .worktree { return item.name }
+        if let wt = worktreeFor(item) { return wt.name }
+        return repos.first { $0.root == item.repo }?.health?.branch == item.name ? item.repo : nil
+    }
+
+    /// 打开前看一眼目录还在不在：扫完之后可能被删掉或移走。不在了就写明原因。
+    public func canOpen(folder path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue { return true }
+        openError = L.folderGone(Format.tildePath(path))
+        return false
     }
 
     // MARK: 删除

@@ -15,7 +15,8 @@ var en = Text{
 
 Scans the extra worktrees and local branches in your repos and sorts them into
 "removable" (with evidence) and "keep" (with reasons). Each repo also gets a
-checkup: disk usage, uncommitted changes in the main worktree, stashes, the
+checkup: disk usage, orphaned directories under .claude/worktrees that git no
+longer has registered, uncommitted changes in the main worktree, stashes, the
 current branch vs. its upstream, the last commit, and whether the backup remote
 (named backup unless set; skipped in repos that don't have it) is up to date
 (report only, nothing is changed).
@@ -132,6 +133,7 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	RemovableLine:   "          removable: %d (worktrees %d, branches %d), %s\n",
 	KeptLine:        "          keep: %d (worktrees %d, branches %d)",
 	KeptUnmerged:    ", %d with unmerged work",
+	OrphansLine:     "          orphaned dirs: %d, %s in total (under .claude/worktrees, no longer registered in git; reported only, never deleted)\n",
 	ExcludedLine:    Count{"          skipped %d repo (--exclude)\n", "          skipped %d repos (--exclude)\n"},
 	FilterLine:      "          filtered: %s (other items aren't shown or counted above, and --apply won't delete them)\n",
 	FilterOlder:     "last active more than %s ago",
@@ -158,12 +160,16 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 
 	Checkup:         "  Checkup",
 	RowUsage:        "Disk",
+	RowOrphans:      "Orphans",
 	RowMain:         "Main tree",
 	RowLastCommit:   "Last commit",
 	RowNotChecked:   "Not checked",
 	Usage1:          ".git %s · main tree %s",
 	UsageWorktrees:  " · extra worktrees: %d, %s in total",
 	DirsGone:        Count{" (%d dir gone)", " (%d dirs gone)"},
+	Orphans:         "orphaned dirs: %d, %s in total (no longer registered in git; reported only, check for uncommitted work before deleting):",
+	OrphanGitFile:   "has a .git file, registration gone",
+	OrphanNoGitFile: "no .git file",
 	NoUpstream:      "%s, no upstream",
 	UpstreamGone:    "%s, upstream %s is gone",
 	UpstreamSame:    "%s, in sync with %s",
@@ -187,6 +193,7 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	StaleBehind:     "behind  %s: %d local commits not pushed",
 	StaleDiverged:   "diverged  %s: %d commits only local, %[4]d only on %[3]s",
 	StaleUnknown:    "unknown  %s: %s has %s, which isn't here locally (fetch and check again)",
+	AttnOrphans:     "orphaned dirs: %d, %s in total",
 	AttnChanges:     "uncommitted changes in main tree: %d",
 	AttnStashes:     "stashes: %d",
 	AttnUpstream:    "%s differs from upstream (%d ahead, %d behind)",
@@ -300,11 +307,11 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	UndoWillWorktree: "will recreate it at its original path (%s)",
 	UndoDidWorktree:  "recreated it at its original path (%s)",
 
+	FindOrphans:     "looking for orphaned directories under %s",
 	MeasureGitDir:   "measuring the git directory",
 	Measure:         "measuring %s",
 	CheckChanges:    "checking uncommitted changes",
 	CountStashes:    "counting stashes",
-	FindBranch:      "finding the current branch",
 	FindUpstream:    "finding the upstream",
 	CompareUpstream: "comparing with the upstream",
 	FindLastCommit:  "finding the last commit",

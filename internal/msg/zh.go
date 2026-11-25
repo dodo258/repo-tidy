@@ -14,8 +14,9 @@ var zh = Text{
       repo-tidy --undo [日志] [--apply] [--json] [--lang zh|en]
 
 扫描仓库里的附加 worktree 和本地分支，分成「可删」（附证据）和「留着」（附原因）；
-每个仓库另有一段体检：占用空间、主工作区未提交改动、stash、当前分支相对上游、
-最后一次提交、备份远程（默认叫 backup，仓库里没有就不提）是不是推到最新（只报不动）。
+每个仓库另有一段体检：占用空间、.claude/worktrees 下 git 里已没有登记的
+孤儿目录、主工作区未提交改动、stash、当前分支相对上游、最后一次提交、
+备份远程（默认叫 backup，仓库里没有就不提）是不是推到最新（只报不动）。
 路径可以是一个仓库，也可以是一个目录（扫它下面的仓库，往下几层看 --depth）。
 不给路径时扫 $REPO_TIDY_ROOT，没设就扫 ~/projects。
 
@@ -115,6 +116,7 @@ var zh = Text{
 	RemovableLine:   "      可删 %d 项（worktree %d、分支 %d），%s\n",
 	KeptLine:        "      留着 %d 项（worktree %d、分支 %d）",
 	KeptUnmerged:    "，其中 %d 项有未合并内容",
+	OrphansLine:     "      孤儿目录 %d 个，共 %s（.claude/worktrees 下，git 里已没有登记；只报不删）\n",
 	ExcludedLine:    same("      跳过 %d 个仓库（--exclude）\n"),
 	FilterLine:      "      已筛选：%s（筛掉的项不显示、不计入上面的数字，--apply 也不删）\n",
 	FilterOlder:     "最后活动在 %s 之前",
@@ -141,12 +143,16 @@ var zh = Text{
 
 	Checkup:         "  体检",
 	RowUsage:        "占用",
+	RowOrphans:      "孤儿目录",
 	RowMain:         "主工作区",
 	RowLastCommit:   "最后提交",
 	RowNotChecked:   "没查成",
 	Usage1:          ".git %s · 主工作区 %s",
 	UsageWorktrees:  " · 附加 worktree %d 个共 %s",
 	DirsGone:        same("（%d 个目录已不在）"),
+	Orphans:         "%d 个共 %s（git 里已没有登记；只报不删，删之前看看里面有没有没提交的东西）：",
+	OrphanGitFile:   ".git 文件还在，登记没了",
+	OrphanNoGitFile: "没有 .git 文件",
 	NoUpstream:      "%s，没设上游",
 	UpstreamGone:    "%s，上游 %s 已不在",
 	UpstreamSame:    "%s，和 %s 一致",
@@ -170,6 +176,7 @@ var zh = Text{
 	StaleBehind:     "落后  %s：本地多 %d 个提交",
 	StaleDiverged:   "分叉  %s：本地多 %d 个提交、%s 多 %d 个",
 	StaleUnknown:    "比不了  %s：%s 上是 %s，本地没有这个提交（fetch 后再看）",
+	AttnOrphans:     "孤儿目录 %d 个共 %s",
 	AttnChanges:     "主工作区 %d 个未提交改动",
 	AttnStashes:     "%d 个 stash",
 	AttnUpstream:    "%s 和上游不一致（领先 %d，落后 %d）",
@@ -283,11 +290,11 @@ var zh = Text{
 	UndoWillWorktree: "会在原路径建回（%s）",
 	UndoDidWorktree:  "在原路径建回了（%s）",
 
+	FindOrphans:     "找 %s 下的孤儿目录",
 	MeasureGitDir:   "量 git 目录的大小",
 	Measure:         "量 %s 的大小",
 	CheckChanges:    "看未提交改动",
 	CountStashes:    "数 stash",
-	FindBranch:      "找当前分支",
 	FindUpstream:    "找上游",
 	CompareUpstream: "比对上游",
 	FindLastCommit:  "找最后一次提交",

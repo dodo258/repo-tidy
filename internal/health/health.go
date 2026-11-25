@@ -1,4 +1,4 @@
-// Package health 给一个仓库做体检：占用空间、主工作区状态、stash 数、
+// Package health 给一个仓库做体检：占用空间、.claude/worktrees 下的孤儿目录、主工作区状态、stash 数、
 // 当前分支相对上游领先落后、最后一次提交时间、备份远程（默认叫 backup）是不是推到最新。
 // 只报不动：不 fetch、不刷新 index、不写 .git；--online 时只多跑一条 ls-remote。
 package health
@@ -44,8 +44,9 @@ type Report struct {
 	t *msg.Text // 写说明和出错原因用的文案
 
 	GitDir    Size   // 公共 git 目录（通常是 .git）
-	Main      Size   // 主工作区，不含 .git 和放在里面的附加 worktree
+	Main      Size   // 主工作区，不含 .git、放在里面的附加 worktree 和孤儿目录
 	Worktrees []Size // 附加 worktree，顺序同 git worktree list
+	Orphans   []Orphan
 
 	Branch       string // 主工作区当前分支；分离头指针时为空
 	Upstream     string // 上游，没设为空
@@ -112,10 +113,12 @@ func Inspect(ctx context.Context, dir string, opts Options, lang msg.Lang) (Repo
 		r.Note = t.Bare
 		return *r, nil
 	}
+	r.Branch = wts[0].Branch
 	common, err := gitx.Run(ctx, r.Root, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return *r, fmt.Errorf(t.FindGitDir, err)
 	}
+	r.orphans(ctx, common, wts)
 	r.sizes(ctx, common, wts)
 	r.workdir(ctx)
 	r.upstream(ctx)
@@ -128,19 +131,24 @@ func (r *Report) fail(what string, err error) {
 	r.Errs = append(r.Errs, fmt.Sprintf(r.t.Colon, what, brief(r.t, err)))
 }
 
-// sizes 量 .git、主工作区和各附加 worktree。放在主工作区里的 worktree（如 .claude/worktrees/x）
-// 只算在它自己头上，不重复算进主工作区。
+// sizes 量 .git、主工作区、各附加 worktree 和孤儿目录。放在主工作区里的 worktree（如 .claude/worktrees/x）
+// 和孤儿目录只算在它自己头上，不重复算进主工作区。
 func (r *Report) sizes(ctx context.Context, common string, wts []gitx.Worktree) {
 	skip := map[string]bool{canon(common): true, canon(filepath.Join(r.Root, ".git")): true}
 	for _, w := range wts[1:] {
 		skip[canon(w.Path)] = true
 	}
-	// .git、主工作区、各附加 worktree 一起并行量（同时读目录的协程数有上限，见 readSlots）
+	// 这些目录一起并行量（同时读目录的协程数有上限，见 readSlots）
 	paths := []string{common, r.Root}
 	roots := []sizeRoot{{path: canon(common)}, {path: canon(r.Root), useSkip: true}}
 	for _, w := range wts[1:] {
 		paths = append(paths, w.Path)
 		roots = append(roots, sizeRoot{path: canon(w.Path), useSkip: true})
+	}
+	for _, o := range r.Orphans {
+		skip[o.Path] = true // 找的时候就是解析过符号链接的路径
+		paths = append(paths, o.Path)
+		roots = append(roots, sizeRoot{path: o.Path, useSkip: true})
 	}
 	sizes, errs := dirSizes(ctx, roots, skip)
 	for i, p := range paths {
@@ -153,7 +161,10 @@ func (r *Report) sizes(ctx context.Context, common string, wts []gitx.Worktree) 
 			r.fail(fmt.Sprintf(r.t.Measure, p), errs[i])
 		}
 	}
-	r.GitDir, r.Main, r.Worktrees = sizes[0], sizes[1], sizes[2:]
+	r.GitDir, r.Main, r.Worktrees = sizes[0], sizes[1], sizes[2:len(wts)+1]
+	for i := range r.Orphans {
+		r.Orphans[i].Size = sizes[len(wts)+1+i]
+	}
 }
 
 func canon(p string) string {
@@ -189,15 +200,9 @@ func (r *Report) workdir(ctx context.Context) {
 
 // upstream 算主工作区当前分支相对上游领先落后多少个提交。
 func (r *Report) upstream(ctx context.Context) {
-	br, code, err := gitx.Exec(ctx, r.Root, gitx.Opts{}, "symbolic-ref", "-q", "--short", "HEAD")
-	if code == 1 {
+	if r.Branch == "" {
 		return // 分离头指针
 	}
-	if err != nil {
-		r.fail(r.t.FindBranch, err)
-		return
-	}
-	r.Branch = strings.TrimSpace(br)
 	out, err := gitx.Run(ctx, r.Root, "for-each-ref", "--format=%(upstream)%00%(upstream:short)%00%(upstream:track)", "refs/heads/"+r.Branch)
 	if err != nil {
 		r.fail(r.t.FindUpstream, err)
@@ -236,7 +241,7 @@ func leftRight(ctx context.Context, dir, a, b string) (int, int, error) {
 }
 
 func (r *Report) lastCommit(ctx context.Context) {
-	out, err := gitx.Run(ctx, r.Root, "for-each-ref", "--sort=-committerdate", "--count=1", "--format=%(committerdate:unix)%00%(refname:short)", "refs/heads")
+	out, err := gitx.Run(ctx, r.Root, "for-each-ref", "--sort=-committerdate", "--count=1", "--format=%(committerdate:unix)%00%(refname:lstrip=2)", "refs/heads")
 	if err != nil {
 		r.fail(r.t.FindLastCommit, err)
 		return
@@ -283,7 +288,8 @@ func (r *Report) backup(ctx context.Context, online bool) {
 			return
 		}
 	}
-	out, err := gitx.Run(ctx, r.Root, "for-each-ref", "--format=%(refname:short)%00%(objectname)", "refs/heads")
+	// 分支名不用 refname:short：有同名标签时它给的是 heads/<分支>，对不上备份远程上的分支名
+	out, err := gitx.Run(ctx, r.Root, "for-each-ref", "--format=%(refname:lstrip=2)%00%(objectname)", "refs/heads")
 	if err != nil {
 		r.fail(r.t.ListingBranches, err)
 		return
