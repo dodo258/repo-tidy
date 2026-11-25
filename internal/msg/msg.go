@@ -98,6 +98,8 @@ type Text struct {
 	BadOlderThan     string
 	BadOnly          string
 	UndoWithFilter   string
+	UndoWithExclude  string
+	EmptyExclude     string
 	SelectNeedsApply string
 	NoRepos          string
 	WriteJSON        string
@@ -148,6 +150,7 @@ type Text struct {
 	RemovableLine   string
 	KeptLine        string
 	KeptUnmerged    string
+	ExcludedLine    Count
 	FilterLine      string
 	FilterOlder     string
 	FilterOnlyWT    string
@@ -232,16 +235,17 @@ type Text struct {
 	CountUnique       string
 
 	// judge：证据（长的给 --verbose 和 JSON，短的给默认一行）
-	EvSame, EvSameShort         string
-	EvOnDef, EvOnDefShort       string
-	EvMerged, EvMergedShort     string
-	EvSquash, EvSquashShort     string
-	EvRebase, EvRebaseShort     string
-	EvNoNet                     string
-	EvContent, EvContentShort   string
-	EvPushed, EvPushedShort     string
-	EvPrunable, EvPrunableShort string
-	EvRemoveWTFirst             string
+	EvSame, EvSameShort           string
+	EvOnDef, EvOnDefShort         string
+	EvMerged, EvMergedShort       string
+	EvSquash, EvSquashShort       string
+	EvRebase, EvRebaseShort       string
+	EvNoNet                       string
+	EvContent, EvContentShort     string
+	EvPushed, EvPushedShort       string
+	EvPrunable, EvPrunableShort   string
+	EvRemoveWTFirst               string
+	EvStaleLock, EvStaleLockShort string
 
 	// judge：留着的原因
 	MainBranch      string
@@ -251,6 +255,7 @@ type Text struct {
 	NotOnDefault    string
 	Locked          string
 	LockedWhy       string
+	LockedLive      string
 	CantRead        string
 	InProgress      string
 	RebaseOrAm      string
@@ -275,8 +280,12 @@ type Text struct {
 	ChangedKeep    string
 	Changed        string
 	Pruned         string
-	Removed        string
+	WasBranch      string
+	WasOnBranch    string
+	WasDetached    string
+	WasNoCommit    string
 	Failed         string
+	RelockFailed   string
 	ConfirmFailed  string
 	RemoteGone     string
 	RemoteUnknown  string

@@ -104,15 +104,18 @@ struct OutcomeSheet: View {
                 Text(L.undoError(err)).font(Theme.note).foregroundStyle(Theme.held)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                if !o.log.isEmpty {
+            // 路径自己占一行，放不下就换行，不和按钮挤、不截断
+            if !o.log.isEmpty {
+                HStack(alignment: .firstTextBaseline) {
                     Text(L.restoreLog(Format.tildePath(o.log))).font(Theme.meta).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     Button(L.showInFinder) {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: o.log)])
                     }
-                    .buttonStyle(.link).font(Theme.meta)
+                    .buttonStyle(.link).font(Theme.meta).fixedSize()
                 }
+            }
+            HStack {
                 Spacer()
                 if store.canUndo {
                     if store.applying { ProgressView().controlSize(.small) }
@@ -165,7 +168,7 @@ struct OutcomeSheet: View {
             .font(Theme.verdict)
             VStack(alignment: .leading, spacing: 2) {
                 Text((kind == .worktree ? L.kindWorktree : L.kindBranch) + " " + name).font(Theme.name)
-                Text(message).font(Theme.note).foregroundStyle(.secondary)
+                Text(message).font(Theme.note).foregroundStyle(.secondary).textSelection(.enabled)
             }
         }
     }

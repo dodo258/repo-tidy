@@ -2,8 +2,10 @@ package judge
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -67,16 +69,39 @@ func (c *checker) checkWorktree(w gitx.Worktree) wtCheck {
 		}
 	}
 	if w.Locked {
-		reason := c.t.Locked
-		if w.LockReason != "" {
-			reason = fmt.Sprintf(c.t.LockedWhy, w.LockReason)
+		pids, stale := staleLock(w.LockReason, pidAlive)
+		if !stale {
+			reason := c.t.Locked
+			switch {
+			case len(pids) > 0:
+				reason = fmt.Sprintf(c.t.LockedLive, joinPIDs(pids), w.LockReason)
+			case w.LockReason != "":
+				reason = fmt.Sprintf(c.t.LockedWhy, w.LockReason)
+			}
+			it.Basis, it.Reasons = Keep, []string{reason}
+			return wtCheck{item: it, done: true}
 		}
-		it.Basis, it.Reasons = Keep, []string{reason}
-		return wtCheck{item: it, done: true}
+		// 持锁进程都不在了：锁是崩掉的会话留下的，照没锁一样往下判，删时先解锁。
+		// git 不把锁定的 worktree 报成 prunable，目录不在了要自己看。
+		it.StaleLock = w.LockReason
+		if _, err := os.Stat(w.Path); errors.Is(err, fs.ErrNotExist) {
+			// 目录不在本机（可能在容器或别的机器上用着）：看登记目录里最近有没有动过
+			admin, err := c.adminDir(w.Path)
+			if err != nil {
+				it.Basis, it.Reasons = Keep, []string{fmt.Sprintf(c.t.CantRead, err)}
+				return wtCheck{item: it, done: true}
+			}
+			if reasons := c.busyReasons(w.Path, admin); len(reasons) > 0 {
+				it.Basis, it.Reasons = Keep, reasons
+				return wtCheck{item: it, done: true}
+			}
+			w.Prunable = true
+		}
 	}
 	if w.Prunable {
 		it.Basis, it.Removable = Prunable, true
 		it.Evidence, it.Short = c.t.EvPrunable, c.t.EvPrunableShort
+		c.noteStaleLock(&it)
 		return wtCheck{item: it, done: true}
 	}
 
@@ -124,6 +149,24 @@ func (c *checker) checkWorktree(w gitx.Worktree) wtCheck {
 	return wtCheck{item: it, reasons: reasons, dirty: len(dirty) > 0}
 }
 
+// adminDir 找 worktree 在 git 公共目录 worktrees/ 下的登记目录：里面的 gitdir 文件指向「<路径>/.git」。
+func (c *checker) adminDir(path string) (string, error) {
+	base := filepath.Join(c.common, "worktrees")
+	ents, err := os.ReadDir(base)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", base, err)
+	}
+	want := filepath.Join(path, ".git")
+	for _, e := range ents {
+		dir := filepath.Join(base, e.Name())
+		b, err := os.ReadFile(filepath.Join(dir, "gitdir"))
+		if err == nil && filepath.Clean(strings.TrimSpace(string(b))) == want {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("no entry under %s points to %s", base, want)
+}
+
 // worktreeItem 把目录里查到的情况和提交判定合成结论。
 func (c *checker) worktreeItem(chk wtCheck, statusOf func(sha, branch string) proof) Item {
 	it := chk.item
@@ -140,7 +183,18 @@ func (c *checker) worktreeItem(chk wtCheck, statusOf func(sha, branch string) pr
 		return it
 	}
 	it.apply(p)
+	c.noteStaleLock(&it)
 	return it
+}
+
+// noteStaleLock 给锁已失效的可删 worktree 在证据后面注明：持锁进程已退出，删时先解锁。
+func (c *checker) noteStaleLock(it *Item) {
+	if !it.Removable || it.StaleLock == "" {
+		return
+	}
+	pids := joinPIDs(lockPIDs(it.StaleLock))
+	it.Evidence += fmt.Sprintf(c.t.EvStaleLock, pids)
+	it.Short += fmt.Sprintf(c.t.EvStaleLockShort, pids)
 }
 
 // worktreeStatus 返回未提交改动（含未跟踪文件）和被忽略的路径。

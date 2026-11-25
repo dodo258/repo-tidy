@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,7 +23,7 @@ import (
 	"github.com/dodo258/repo-tidy/internal/report"
 )
 
-var version = "0.2.0"
+var version = "0.3.0"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -60,6 +61,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		lang, t = l, msg.For(l)
 		return nil
 	})
+	var excludes []string
+	fs.Func("exclude", "", func(s string) error {
+		if s == "" {
+			return errors.New(t.EmptyExclude)
+		}
+		excludes = append(excludes, s)
+		return nil
+	})
 	var paths []string
 	for { // 允许参数和路径交替出现
 		if err := fs.Parse(args); err != nil {
@@ -86,6 +95,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		if *olderThan != "" || *only != "" {
 			fail(t.UndoWithFilter)
+			return 2
+		}
+		if len(excludes) > 0 {
+			fail(t.UndoWithExclude)
 			return 2
 		}
 		if len(paths) > 1 {
@@ -140,6 +153,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		paths = []string{root}
 	}
+	// 命令行的 --exclude 和 REPO_TIDY_EXCLUDE（冒号分隔）取并集
+	ex, err := discover.NewExcludes(append(excludes, discover.SplitEnv(os.Getenv("REPO_TIDY_EXCLUDE"))...), home)
+	if err != nil {
+		fail(err.Error())
+		return 2
+	}
 	dirs, err := discover.Repos(paths, *depth)
 	if err != nil {
 		fail(err.Error())
@@ -148,6 +167,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(dirs) == 0 {
 		fail(t.NoRepos)
 		return 1
+	}
+	// 被排除的仓库从这里起就不在了：不判定、不体检、不报告，--apply 也不删，勾选了也不列
+	pk := pickRepos(ctx, dirs, ex)
+	for repo := range wants {
+		if pk.skipped[repo] || ex.Match(repo) {
+			delete(wants, repo)
+		}
 	}
 
 	now := time.Now()
@@ -161,7 +187,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		show = prog.show
 	}
 	// 筛掉的项从这里起就不在报告里：不显示、不计入总览，--apply 也不会删
-	reps := filter.Apply(inspectAll(ctx, dirs, hopts, scanOpts, show), now)
+	reps := filter.Apply(inspectAll(ctx, pk.dirs, hopts, scanOpts, show), now)
 	if prog != nil {
 		prog.done()
 	}
@@ -170,7 +196,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		failed = failed || r.Err != ""
 	}
 	if *asJSON && !*doApply {
-		if err := report.JSON(stdout, reps, now, filter); err != nil {
+		if err := report.JSON(stdout, reps, now, filter, pk.nSkip); err != nil {
 			fail(fmt.Sprintf(t.WriteJSON, err))
 			return 1
 		}
@@ -182,7 +208,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			mode = t.ModeApply
 		}
 		fmt.Fprintf(stdout, t.Header, mode, now.Format("2006-01-02 15:04"), t.Repos.N(len(reps)))
-		report.Text(stdout, reps, now, home, *verbose, lang, filter)
+		report.Text(stdout, reps, now, home, *verbose, lang, filter, pk.nSkip)
 	}
 	if !*doApply {
 		if n := countRemovable(reps); n > 0 {
@@ -200,6 +226,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fail(err.Error())
 		return 1
 	}
+	res.excluded = pk.nSkip
 	if *asJSON {
 		if err := writeApplyJSON(stdout, res); err != nil {
 			fail(fmt.Sprintf(t.WriteJSON, err))

@@ -26,10 +26,10 @@ const manyRemovable = 10
 // Text 先输出总览，再按乱的程度从多到少输出各仓库；干净的仓库每个折成一行放在最后。
 // home 用来把路径缩写成 ~。可删项默认一行一个、证据写短形式；verbose 时证据另起一行写全。
 // 文字用 lang 这种语言；判定里的证据和原因是 judge 按同一语言写好的。
-// reps 是已经按 f 筛过的结果，f 只用来在总览里注明条件。
-func Text(w io.Writer, reps []Repo, now time.Time, home string, verbose bool, lang msg.Lang, f Filter) {
+// reps 是已经按 f 筛过的结果，f 只用来在总览里注明条件；excluded 是 --exclude 跳过的仓库数，总览里注明。
+func Text(w io.Writer, reps []Repo, now time.Time, home string, verbose bool, lang msg.Lang, f Filter, excluded int) {
 	t := msg.For(lang)
-	overview(w, t, Summarize(reps), f)
+	overview(w, t, Summarize(reps), f, excluded)
 	var cleans []Repo
 	for _, r := range Sort(reps) {
 		if clean(r) {

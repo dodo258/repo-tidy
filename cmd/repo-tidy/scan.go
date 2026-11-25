@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/dodo258/repo-tidy/internal/discover"
 	"github.com/dodo258/repo-tidy/internal/gitx"
 	"github.com/dodo258/repo-tidy/internal/health"
 	"github.com/dodo258/repo-tidy/internal/judge"
@@ -18,10 +19,8 @@ import (
 // repoWorkers 是同时扫几个仓库。每个仓库里判定和体检并行；量大小的读目录另有全局上限（health.readSlots）。
 const repoWorkers = 4
 
-// inspectAll 判定并体检每个仓库。同一个仓库从不同路径进来（比如给了它的附加 worktree）只扫一次，
-// 保留第一次出现的位置。每开始扫一个仓库调一次 progress（可以为 nil）。
+// inspectAll 判定并体检每个仓库，dirs 是 pickRepos 选好的。每开始扫一个仓库调一次 progress（可以为 nil）。
 func inspectAll(ctx context.Context, dirs []string, hopts health.Options, opts judge.Options, progress func(i, n int, root string)) []report.Repo {
-	dirs = uniqueRepos(ctx, dirs)
 	reps := make([]report.Repo, len(dirs))
 	var mu sync.Mutex
 	started := 0
@@ -60,30 +59,64 @@ func inspectAll(ctx context.Context, dirs []string, hopts health.Options, opts j
 	return reps
 }
 
-// uniqueRepos 按主工作区去重：discover 会把另一个仓库的附加 worktree（目录里有 .git 文件）
-// 也当成候选，不去重的话同一个仓库要整个扫两遍。列不了 worktree 的目录原样留着，扫的时候报错。
-func uniqueRepos(ctx context.Context, dirs []string) []string {
+// picked 是 pickRepos 的结果。
+type picked struct {
+	dirs    []string        // 要扫的目录：每个仓库一个，保留第一次出现的位置
+	skipped map[string]bool // 被排除的候选目录和这些仓库的工作区路径（--select 用它认出被排除的仓库）
+	nSkip   int             // 跳过了几个仓库，同一个仓库只计一次
+}
+
+// pickRepos 按主工作区去重，并去掉被排除的仓库。discover 会把另一个仓库的附加 worktree
+// （目录里有 .git 文件）也当成候选，不去重的话同一个仓库要整个扫两遍。候选目录本身，
+// 或这个仓库的任何一个工作区（主工作区、附加 worktree）落在排除路径里，整个仓库都不扫，
+// 这样排除路径下的东西不会被报告，也不会被 --apply 删。列不了 worktree 的目录原样留着，扫的时候报错。
+func pickRepos(ctx context.Context, dirs []string, ex discover.Excludes) picked {
 	roots := make([]string, len(dirs))
+	paths := make([][]string, len(dirs)) // 每个候选的所有工作区路径（含候选目录本身）
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, repoWorkers)
 	for i, d := range dirs {
 		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			roots[i] = d
+			roots[i], paths[i] = d, []string{d}
 			if wts, err := gitx.Worktrees(ctx, d); err == nil && len(wts) > 0 {
 				roots[i] = wts[0].Path
+				for _, w := range wts {
+					paths[i] = append(paths[i], w.Path)
+				}
 			}
 		})
 	}
 	wg.Wait()
-	seen := map[string]bool{}
-	var out []string
-	for i, d := range dirs {
-		if !seen[roots[i]] {
-			seen[roots[i]] = true
-			out = append(out, d)
+	excluded := map[string]bool{} // 主工作区 → 被排除
+	if ex.Any() {
+		for i := range dirs {
+			for _, p := range paths[i] {
+				if ex.Match(p) {
+					excluded[roots[i]] = true
+					break
+				}
+			}
 		}
+	}
+	out := picked{skipped: map[string]bool{}}
+	seen := map[string]bool{}
+	for i, d := range dirs {
+		if excluded[roots[i]] {
+			for _, p := range paths[i] {
+				out.skipped[p] = true
+			}
+		}
+		if seen[roots[i]] {
+			continue
+		}
+		seen[roots[i]] = true
+		if excluded[roots[i]] {
+			out.nSkip++
+			continue
+		}
+		out.dirs = append(out.dirs, d)
 	}
 	return out
 }

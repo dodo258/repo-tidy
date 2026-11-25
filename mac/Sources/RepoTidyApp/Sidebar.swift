@@ -32,6 +32,9 @@ struct Sidebar: View {
             VStack(alignment: .leading, spacing: Theme.gap) {
                 Divider()
                 Text(L.overviewCounts(s.repos, s.worktrees, s.branches))
+                if let n = s.excluded, n > 0 {
+                    Text(L.overviewExcluded(n))
+                }
                 if s.removable > 0 {
                     Text(s.removableLine)
                         .foregroundStyle(Theme.cleared)

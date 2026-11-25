@@ -278,9 +278,10 @@ func TestLangFromEnvAndFlag(t *testing.T) {
 
 func TestApplyInEnglish(t *testing.T) {
 	root := langFixture(t)
+	tip := tr.Git(t, filepath.Join(root, "one"), "rev-parse", "done")[:8]
 	out := runOut(t, "--apply", "--lang", "en", root)
 	noChinese(t, "英文删除输出", out)
-	for _, want := range []string{"\nDeleting:\n", "  deleted  branch done: deleted\n", "  deleted  worktree ", ": cleared git's record\n", "Restore commands are in "} {
+	for _, want := range []string{"\nDeleting:\n", "  deleted  branch done: was at " + tip + "\n", "  deleted  worktree ", ": cleared git's record, was on a detached HEAD @ ", "Restore commands are in "} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("英文删除输出缺 %q：\n%s", want, out)
 		}

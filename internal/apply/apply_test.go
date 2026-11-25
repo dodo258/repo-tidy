@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -270,5 +271,117 @@ func TestApplySkipsWorktreeThatBecameBusy(t *testing.T) {
 	}
 	if !hasBranch(t, f.dir, "late") {
 		t.Fatal("分支被删了")
+	}
+}
+
+func TestApplyRemovesWorktreeWithStaleLock(t *testing.T) {
+	f := newFixture(t)
+	dead := tr.DeadPID(t)
+	lock := func(p, name string) string {
+		reason := fmt.Sprintf("claude session %s (pid %d)", name, dead)
+		f.g(t, "worktree", "lock", "--reason", reason, p)
+		return reason
+	}
+	stale := filepath.Join(f.wtRoot, "stale")
+	f.g(t, "worktree", "add", "-q", "-b", "stale", stale)
+	lock(stale, "stale")
+	gone := filepath.Join(f.wtRoot, "gone")
+	f.g(t, "worktree", "add", "-q", "-b", "gone", gone)
+	lock(gone, "gone")
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err)
+	}
+
+	_, res, log := run(t, f.dir)
+	for _, name := range []string{"stale", "gone"} {
+		if r := result(t, res, name); !r.Done {
+			t.Fatalf("%s 锁已失效，应删掉：%+v", name, r)
+		}
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale 目录应已删：%v", err)
+	}
+	if out := f.g(t, "worktree", "list", "--porcelain"); strings.Contains(out, "/wts/") {
+		t.Fatalf("登记应已清掉：\n%s", out)
+	}
+	if !strings.Contains(log, fmt.Sprintf("持锁进程（pid %d）已退出", dead)) {
+		t.Fatalf("恢复日志应写明锁已失效：\n%s", log)
+	}
+}
+
+func TestApplyRelocksWhenRemoveFails(t *testing.T) {
+	f := newFixture(t)
+	sub := filepath.Join(filepath.Dir(f.dir), "sub")
+	tr.Init(t, sub)
+	f.g(t, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	f.g(t, "commit", "-q", "-m", "add submodule")
+	wt := filepath.Join(f.wtRoot, "withsub")
+	f.g(t, "worktree", "add", "-q", "-b", "withsub", wt)
+	tr.Git(t, wt, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	tr.Idle(t, wt)
+	reason := fmt.Sprintf("claude session withsub (pid %d)", tr.DeadPID(t))
+	f.g(t, "worktree", "lock", "--reason", reason, wt)
+
+	rep, res, _ := run(t, f.dir)
+	if w, _ := byName(rep.Worktrees, wt); !w.Removable {
+		t.Fatalf("前提：报告时应可删，实际 %+v", w)
+	}
+	// git 不加 --force 不删含子模块的 worktree；没删成要按原来的原因锁回去
+	if r := result(t, res, "withsub"); r.Done {
+		t.Fatalf("含子模块的 worktree 预期删不掉：%+v", r)
+	}
+	if out := f.g(t, "worktree", "list", "--porcelain"); !strings.Contains(out, "locked "+reason) {
+		t.Fatalf("没删成应锁回原来的原因：\n%s", out)
+	}
+}
+
+// 删了的每一项都写原来指向的提交：照着它手动就能建回来。
+func TestApplyResultSaysWhereItPointed(t *testing.T) {
+	f := newFixture(t)
+	add := func(name string, args ...string) string {
+		p := filepath.Join(f.wtRoot, name)
+		f.g(t, append([]string{"worktree", "add", "-q"}, append(args, p)...)...)
+		return p
+	}
+	onBranch := add("on", "-b", "feat/on")
+	onTip := tr.Commit(t, onBranch, "o.txt", "o\n", "o")
+	f.g(t, "merge", "-q", "--no-ff", "-m", "merge", "feat/on")
+	tr.Idle(t, onBranch)
+	tip := f.g(t, "rev-parse", "main")
+	tr.Idle(t, add("loose", "--detach"))
+	// 目录已不在的：检出分支、分离头指针、连检出的分支也没了（git 报的提交号全是 0）
+	goneBranch := add("gone", "-b", "feat/gone")
+	goneLoose := add("gone-loose", "--detach")
+	goneAll := add("gone-all", "-b", "feat/gone-all")
+	for _, p := range []string{goneBranch, goneLoose, goneAll} {
+		if err := os.RemoveAll(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.g(t, "update-ref", "-d", "refs/heads/feat/gone-all")
+
+	_, res, _ := run(t, f.dir)
+	want := map[string]string{
+		"worktree on":         "原来检出分支 feat/on @ " + onTip[:8],
+		"worktree loose":      "原来是分离头指针 @ " + tip[:8],
+		"worktree gone":       "清掉了登记，原来检出分支 feat/gone @ " + tip[:8],
+		"worktree gone-loose": "清掉了登记，原来是分离头指针 @ " + tip[:8],
+		"worktree gone-all":   "清掉了登记，原来没有指向任何提交",
+		"branch feat/on":      "原来指向 " + onTip[:8],
+		"branch feat/gone":    "原来指向 " + tip[:8],
+	}
+	got := map[string]string{}
+	for _, r := range res {
+		name := r.Name
+		if r.Kind == judge.KindWorktree {
+			name = filepath.Base(name)
+		}
+		if !r.Done {
+			t.Errorf("%s %s 应删掉：%s", r.Kind, name, r.Msg)
+		}
+		got[r.Kind+" "+name] = r.Msg
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("结果说明不对：\n得到 %v\n应为 %v", got, want)
 	}
 }

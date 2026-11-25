@@ -58,8 +58,8 @@ func TestRemovableOneLinePerItem(t *testing.T) {
 	small := repo("/p/small", nil, brs[:3]) // 3 个可删，不写计数行
 
 	var def, verbose bytes.Buffer
-	Text(&def, []Repo{big, small}, now, "", false, msg.ZH, Filter{})
-	Text(&verbose, []Repo{big, small}, now, "", true, msg.ZH, Filter{})
+	Text(&def, []Repo{big, small}, now, "", false, msg.ZH, Filter{}, 0)
+	Text(&verbose, []Repo{big, small}, now, "", true, msg.ZH, Filter{}, 0)
 
 	r, d, c := lines(def.String())
 	if r != 15 || d != 2 || c != 1 {

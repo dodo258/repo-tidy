@@ -35,7 +35,7 @@ let sample = """
      "health": {"note": "", "git_dir_bytes": 1, "main_bytes": 2, "branch": "main", "upstream": "",
                 "upstream_gone": false, "ahead": 0, "behind": 0, "changes": 2, "untracked": 1, "stashes": 0,
                 "last_commit": "2026-11-12T18:05:55+08:00", "last_commit_branch": "main",
-                "backup": {"present": true, "online": false, "online_error": "", "checked": 3,
+                "backup": {"remote": "backup", "required": false, "present": true, "online": false, "online_error": "", "checked": 3,
                            "stale": [{"branch": "wip", "state": "not-pushed", "local": "3333", "remote": "",
                                       "local_only": 0, "remote_only": 0}]},
                 "errors": []}},
@@ -67,6 +67,9 @@ func decodeSample() throws -> Report {
     #expect(app.worktrees[1].lastActive == nil && app.worktrees[1].displayName == "/tmp/elsewhere")
     #expect(app.health?.backup.stale.first?.branch == "wip")
     #expect(r.repos.map(\.group) == [.messy, .failed, .clean])
+    #expect(r.summary.excluded == nil) // 旧版命令行没有这个字段，照样能读
+    let withExcluded = sample.replacingOccurrences(of: #""unmeasured": 0}"#, with: #""unmeasured": 0, "excluded": 2}"#)
+    #expect(try JSON.decoder.decode(Report.self, from: Data(withExcluded.utf8)).summary.excluded == 2)
 }
 
 @Test func parsesNanosecondTimes() throws {
@@ -189,4 +192,18 @@ final class Lines: @unchecked Sendable {
     private var lines: [String] = []
     func add(_ l: String) { lock.withLock { lines.append(l) } }
     var all: [String] { lock.withLock { lines } }
+}
+
+@Test func healthLineSkipsBackupRemoteUnlessRequired() throws {
+    Lang.current = .zh
+    var h = try #require(try decodeSample().repos[0].health)
+    h.changes = 0
+    h.lastCommit = nil
+    #expect(h.summaryParts == ["backup 有 1 个分支没推到最新"])
+    h.backup.stale = []
+    #expect(h.summaryParts == ["backup 已推到最新"])
+    h.backup.present = false
+    #expect(h.summaryParts.isEmpty, "仓库里没有 backup 远程、也没显式指定时不该提")
+    h.backup.required = true
+    #expect(h.summaryParts == ["没有 backup 远程"])
 }

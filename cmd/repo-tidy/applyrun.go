@@ -24,11 +24,12 @@ type applyEntry struct {
 }
 
 type applyRun struct {
-	logPath string
-	entries []applyEntry
-	target  int // 打算删几项：没给 --select 是全部可删项，给了是勾选的项数
-	done    int
-	failed  bool
+	logPath  string
+	entries  []applyEntry
+	target   int // 打算删几项：没给 --select 是全部可删项，给了是勾选的项数
+	done     int
+	failed   bool
+	excluded int // --exclude 跳过了几个仓库
 }
 
 // readWants 读 --select 的文件（- 是标准输入），按仓库分组，并按出现顺序返回仓库列表。
@@ -177,6 +178,7 @@ type applyJSONDoc struct {
 	Log     string            `json:"log"`
 	Target  int               `json:"target"`
 	Deleted int               `json:"deleted"`
+	Exclude int               `json:"excluded"` // --exclude 跳过了几个仓库
 	Results []applyJSONResult `json:"results"`
 	Errors  []applyJSONError  `json:"errors"`
 }
@@ -195,7 +197,7 @@ type applyJSONError struct {
 }
 
 func writeApplyJSON(w io.Writer, run applyRun) error {
-	doc := applyJSONDoc{Version: report.JSONVersion, Log: run.logPath, Target: run.target, Deleted: run.done,
+	doc := applyJSONDoc{Version: report.JSONVersion, Log: run.logPath, Target: run.target, Deleted: run.done, Exclude: run.excluded,
 		Results: []applyJSONResult{}, Errors: []applyJSONError{}}
 	for _, e := range run.entries {
 		if e.Err != "" {

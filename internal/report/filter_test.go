@@ -125,9 +125,9 @@ func TestFilterOverviewAndJSON(t *testing.T) {
 		t.Fatalf("总览应按筛选后的算：%+v", o)
 	}
 	var zh, en, plain bytes.Buffer
-	Text(&zh, reps, now, "", false, msg.ZH, f)
-	Text(&en, reps, now, "", false, msg.EN, f)
-	Text(&plain, []Repo{filterRepo(now)}, now, "", false, msg.ZH, Filter{})
+	Text(&zh, reps, now, "", false, msg.ZH, f, 0)
+	Text(&en, reps, now, "", false, msg.EN, f, 0)
+	Text(&plain, []Repo{filterRepo(now)}, now, "", false, msg.ZH, Filter{}, 0)
 	if s := zh.String(); !strings.Contains(s, "已筛选：最后活动在 30d 之前、只看本地分支") || !strings.Contains(s, "可删 1 项（worktree 0、分支 1）") {
 		t.Fatalf("中文总览没注明筛选或数字不对：\n%s", s)
 	}
@@ -152,7 +152,7 @@ func TestFilterOverviewAndJSON(t *testing.T) {
 		} `json:"summary"`
 	}
 	var b bytes.Buffer
-	if err := JSON(&b, reps, now, f); err != nil {
+	if err := JSON(&b, reps, now, f, 0); err != nil {
 		t.Fatal(err)
 	}
 	var d doc
@@ -163,7 +163,7 @@ func TestFilterOverviewAndJSON(t *testing.T) {
 		t.Fatalf("summary.filter 不对：%s", b.String())
 	}
 	b.Reset()
-	if err := JSON(&b, []Repo{filterRepo(now)}, now, Filter{}); err != nil {
+	if err := JSON(&b, []Repo{filterRepo(now)}, now, Filter{}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(b.String(), `"filter": null`) {

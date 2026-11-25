@@ -9,7 +9,7 @@ Claude Code、Codex 这类代理每做一件事就开一个 worktree、一个分
 repo-tidy 把每个 worktree 和本地分支分成两类：
 
 - **可删**：附证据——内容在默认分支的哪个提交里，或推到了哪个远程的哪个引用；
-- **留着**：写明原因——未提交改动、没合并也没推送的提交、被忽略但不能重新生成的文件（`.env`）、锁定、做到一半的 rebase……
+- **留着**：写明原因——未提交改动、没合并也没推送的提交、被忽略但不能重新生成的文件（`.env`）、锁定（持锁进程还在，或锁没写是谁锁的；代理会话崩掉后留下的、持锁进程已退出的锁不算）、做到一半的 rebase……
 
 ![Mac App：左边是仓库，右边每一项都有结论和证据](docs/screenshots/main.png)
 
@@ -42,7 +42,7 @@ sudo mv repo-tidy /usr/local/bin/
 go install github.com/dodo258/repo-tidy/cmd/repo-tidy@latest
 ```
 
-## 三个用法
+## 四个用法
 
 **1. 看一眼所有项目乱不乱**（只读，什么都不删）
 
@@ -76,6 +76,8 @@ repo-tidy ~/projects
 
 给的目录默认只找下面一层的仓库。代码按 `~/code/<组织>/<仓库>` 放的，加 `--depth 2`（最多 4）往下多找几层：找到仓库就不再进它里面（里面的 worktree、子模块不当成另一个仓库），跳过隐藏目录、`node_modules` 和符号链接。
 
+有些仓库不想让它碰，用 `--exclude <路径>` 跳过（可以写多次，认绝对路径、相对路径和 `~/`），或者在环境变量 `REPO_TIDY_EXCLUDE` 里用冒号隔开写好几个，两边合在一起算。路径本身和它下面的仓库都跳过，仓库的任何一个 worktree 在这个路径下也整个跳过：不报告、不体检，`--apply` 也不删；总览注明「跳过 N 个仓库（--exclude）」。比如 `repo-tidy --exclude ~/projects/vendor ~/projects`。
+
 项太多时可以筛：`--older-than 30d`（或 `2w`）只看最后活动在一个月前的，`--only branches` 只看本地分支（`--only worktrees` 只看 worktree），两个能一起用。筛掉的项不显示、不计入总览，`--apply` 也不删；总览最后一行注明「已筛选」和条件。比如只清一个月没动的分支：`repo-tidy --older-than 30d --only branches --apply ~/projects`。
 
 每个仓库还有一段体检（只报不动）：占用空间、主工作区未提交改动和 stash、当前分支相对上游领先落后、最后一次提交，以及备份远程是不是推到了最新（加 `--online` 联网查）。备份远程默认叫 `backup`，用 `--backup-remote <名字>` 换成别的；仓库里没有这个远程就不提这一项，显式给了 `--backup-remote` 才会报「没有 <名字> 远程」。
@@ -98,7 +100,7 @@ repo-tidy --undo --apply    # 建回来：分支指向原来的提交，worktree
 
 `--undo <日志>` 指定撤销哪一次。已经存在的分支或目录跳过不动；提交已被 `git gc` 清掉的会报出来。
 
-**3. 给脚本和代理用**
+**3. 给脚本用**
 
 ```bash
 repo-tidy --json ~/projects | jq .summary
@@ -114,16 +116,67 @@ repo-tidy --json ~/projects \
 
 字段说明、判定细节、退出码见 [docs/reference.md](docs/reference.md)。
 
+**4. 让 Claude Code、Codex 来清**
+
+别让代理自己想办法删。[有人](https://mergify.com/blog/the-day-my-ai-agent-deleted-29-git-worktrees)让 Claude Code 删一个过期的 worktree，它删完又提出把其余不用的也清了，得到一句「Yeah go ahead」，就带着 `--force` 循环删光了 29 个还在用的 worktree，没提交的改动全没了：`--force` 跳过的正是 git 对未提交改动的保护。
+
+把下面这段贴进项目的 `CLAUDE.md`（Codex 等认 `AGENTS.md`）；想所有项目都生效，放 `~/.claude/CLAUDE.md` 或 `~/.codex/AGENTS.md`：
+
+````markdown
+## 清理 worktree 和本地分支
+
+用 `repo-tidy` 清，不自己拼删除命令。没装就停下来告诉我，不换别的办法删。
+
+1. 先看，不删。结果存到临时文件，记下最后打印的路径：
+
+   ```bash
+   f=$(mktemp); repo-tidy --json "$(git rev-parse --show-toplevel)" > "$f"; echo "$f"
+   ```
+
+   把可删的（`verdict` 是 `removable`，附 `evidence`）和留着的（附 `reasons`）都列给我看，然后停下来等我回话。列清单之前我说的「清一下」「去吧」不算同意。
+2. 只删我看过清单后同意的项，从那个文件里挑出来原样送回，不重新扫：
+
+   ```bash
+   jq '{items: [.repos[] | (.worktrees[], .branches[]) | select(.verdict == "removable")]}' <那个路径> \
+     | repo-tidy --apply --json --select -
+   ```
+
+   我只同意一部分，就在 `select(...)` 里再按 `.name` 挑。分支还检出在某个 worktree 里的，要和那个 worktree 一起删。
+3. 删完告诉我删了几项（`deleted` / `target`）、没删的每一项为什么（`message`）、恢复日志在哪（`log`）。要撤销：`repo-tidy --undo <恢复日志> --apply`。
+
+不许：
+- 用 `git worktree remove --force`（`-f`）、`git branch -D`、`rm -rf` 删 worktree 或分支，或写循环批量删；
+- 删 `keep` 的项，或者为了让它变成可删去提交、stash、删文件、解锁、杀进程、加 `--min-idle 0`。
+````
+
+这样代理删的就是你看过的那几项：`--select` 只认清单里的提交，列完之后又有新提交、又有进程在用的，不删。
+
+`CLAUDE.md` 只是提示，代理可能不照做。Claude Code 可以再加一道硬的，写进项目的 `.claude/settings.json` 或 `~/.claude/settings.json`（已有 `permissions.deny` 就把三条并进去）：
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Bash(git *worktree remove *--force*)",
+      "Bash(git *worktree remove -f*)",
+      "Bash(git *worktree remove * -f*)"
+    ]
+  }
+}
+```
+
+包在 `for` 循环里、开着 `bypassPermissions` 也拦（2.1.331 上试过）；`bash -c '…'`、`rm -rf` 这类换个写法的拦不住，所以上面那段还是要贴。不影响 repo-tidy：它删 worktree 本来就不用 `--force`。
+
 ## Mac App
 
-不想敲命令，可以用 `mac/` 里的原生界面（SwiftUI，macOS 14 以上）：左边是全部仓库，按乱的程度排；右边是选中仓库的每个 worktree 和分支，带结论和证据。只有「可删」的能勾，点「清理」先弹窗把要删的每一项和证据再列一遍，确认才删；删完的结果弹窗里有「撤销这次清理」，走的是同一条 `repo-tidy --undo`。菜单栏图标显示可删项总数。
+不想敲命令，可以用 `mac/` 里的原生界面（SwiftUI，macOS 14 以上）：左边是全部仓库，按乱的程度排；右边是选中仓库的每个 worktree 和分支，带结论和证据。项多时右栏顶上可以切到「只看可删」，或按名字、分支搜（⌘F），筛掉的项不显示，勾选不变。worktree 可以按大小（最占地方的在前）或按最后活动时间（最久没动的在前）排，菜单在 Worktree 段标题右边。只有「可删」的能勾，点「清理」先弹窗把要删的每一项和证据再列一遍，确认才删；删完的结果弹窗里有「撤销这次清理」，走的是同一条 `repo-tidy --undo`。菜单栏图标显示可删项总数。
 
 <p>
   <img src="docs/screenshots/confirm.png" width="49%" alt="删除前逐项确认">
   <img src="docs/screenshots/main-dark.png" width="49%" alt="深色模式">
 </p>
 
-不用另装命令行：打包时同一份源码编的 `repo-tidy`（Apple 芯片和 Intel 通用）放在 `RepoTidy.app/Contents/Helpers/` 里，App 的判定和删除全由它来做，界面不另写一套。想用自己编的版本，在设置里填路径或设 `REPO_TIDY_BIN`。设置里的「往下找几层」就是命令行的 `--depth`。
+不用另装命令行：打包时同一份源码编的 `repo-tidy`（Apple 芯片和 Intel 通用）放在 `RepoTidy.app/Contents/Helpers/` 里，App 的判定和删除全由它来做，界面不另写一套。想用自己编的版本，在设置里填路径或设 `REPO_TIDY_BIN`。设置里的「往下找几层」就是命令行的 `--depth`，「排除路径」就是 `--exclude`（可以加好几个，删除时也照样跳过）。
 
 App 暂时没有签名和公证，从源码编（需要 Go 1.26 和 Xcode 或 Swift 6 工具链）：
 

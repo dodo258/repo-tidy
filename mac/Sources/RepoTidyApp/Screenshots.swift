@@ -67,6 +67,13 @@ enum Screenshots {
         // 1. 空状态：文件夹下没有仓库
         let empty = try await scanned(cli, root: a.empty)
         try await shoot(MainView().environment(empty), main, "1-empty", out)
+        // 往下找几层改大了还是没有：说明跟着层数写，4 层是上限
+        for depth in [2, 4] {
+            empty.scanDepth = depth
+            empty.rescanForNewSettings()
+            try await waitIdle(empty)
+            try await shoot(MainView().environment(empty), main, "1-empty-depth\(depth)", out)
+        }
 
         // 2. 扫描中（扫描永远不结束的假后端，画面和真扫描时一样）
         let scanning = store(root: a.messy) { _ in Hanging() }
@@ -93,6 +100,18 @@ enum Screenshots {
         messy.checkAll(in: repo)
         try await shoot(MainView().environment(messy), main, "3-removable", out)
         try await shoot(MainView().environment(messy), main, "3-removable-dark", out, dark: true)
+        // 右栏筛选：只看可删；再加搜索词
+        messy.filter = ItemFilter(onlyRemovable: true)
+        try await shoot(MainView().environment(messy), main, "3-only-removable", out)
+        messy.filter = ItemFilter(query: "export")
+        try await shoot(MainView().environment(messy), main, "3-search", out)
+        messy.filter = ItemFilter()
+        // 右栏 worktree 的排序
+        messy.worktreeSort = .largest
+        try await shoot(MainView().environment(messy), main, "3-sort-largest", out)
+        messy.worktreeSort = .longestIdle
+        try await shoot(MainView().environment(messy), main, "3-sort-idle", out)
+        messy.worktreeSort = .standard
         try await shoot(ConfirmSheet().environment(messy), CGSize(width: 600, height: 480), "3-confirm", out, chrome: false)
         try await shoot(MenuBarPanel().environment(messy), CGSize(width: 320, height: 250), "3-menubar", out, chrome: false)
         // 真删一次勾选的项，截结果
@@ -130,10 +149,20 @@ enum Screenshots {
         missing.refresh()
         try await shoot(MainView().environment(missing), main, "6-missing-cli", out)
 
-        // 7. 设置：扫描的文件夹、往下找几层、命令行工具
+        // 7. 排除了一个仓库：它不出现，侧栏总览写「跳过 1 个仓库」
+        let excluded = store(root: a.messy) { _ in cli }
+        excluded.addExcludes([a.messy + "/site"]) // 加了就重新扫描
+        try await waitIdle(excluded)
+        guard excluded.report?.summary.excluded == 1, !excluded.repos.contains(where: { $0.name == "site" }) else {
+            throw Failure(description: "排除 site 后它还在报告里，或总览没写跳过：\(excluded.error ?? "")")
+        }
+        try await shoot(MainView().environment(excluded), main, "7-excluded", out)
+
+        // 8. 设置：扫描的文件夹、往下找几层、排除路径、命令行工具
         let settings = store(root: a.messy) { _ in nil }
         settings.scanDepth = 2
-        try await shoot(SettingsView().environment(settings), CGSize(width: 560, height: 230), "7-settings", out, chrome: false)
+        settings.addExcludes([a.messy + "/site"])
+        try await shoot(SettingsView().environment(settings), CGSize(width: 560, height: 360), "8-settings", out, chrome: false)
     }
 
     /// 每个场景一套独立的设置，不读写用户自己的。
@@ -211,12 +240,13 @@ final class OffscreenWindow: NSWindow {
 
 /// 永远扫不完的后端，只给「扫描中」截图用：报一次进度（演示目录里两个仓库，正扫第二个）就停住。
 struct Hanging: Backend {
-    func scan(root: String, depth: Int, online: Bool, progress: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult {
+    func scan(root: String, depth: Int, excludes: [String], online: Bool,
+              progress: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult {
         progress(ScanProgress(current: 2, total: 2, repo: "todo-app"))
         try await Task.sleep(for: .seconds(3600))
         throw CancellationError()
     }
 
-    func apply(_ items: [Item]) async throws -> ApplyOutcome { throw CancellationError() }
+    func apply(_ items: [Item], excludes: [String]) async throws -> ApplyOutcome { throw CancellationError() }
     func undo(log: String) async throws -> UndoOutcome { throw CancellationError() }
 }

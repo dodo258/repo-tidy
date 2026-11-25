@@ -33,6 +33,13 @@ public struct Strings: Sendable {
     public let cliHint: String
     public let settingsDepth: String
     public let depthHint: String
+    public let settingsExclude: String
+    public let excludeNone: String
+    public let excludeAdd: String
+    public let excludeRemoveHelp: String
+    public let excludeHint: String
+    public let excludePanelPrompt: String
+    public let excludePanelMessage: String
 
     // MARK: 主窗口
     public let applyFailedTitle: String
@@ -46,6 +53,8 @@ public struct Strings: Sendable {
     public let groupFailed: String
     public let groupClean: String
     public let overviewCounts: Fmt3<Int, Int, Int>
+    /// 「跳过 2 个仓库（排除路径）」：设置里的排除路径挡掉的仓库数。
+    public let overviewExcluded: Fmt1<Int>
     public let nothingRemovable: String
     public let scannedAtReadOnly: Fmt1<String>
     public let repoScanFailed: String
@@ -80,6 +89,17 @@ public struct Strings: Sendable {
     public let lastActiveHelpBranch: String
     public let verdictRemovable: String
     public let verdictKeep: String
+    /// 右栏的筛选：搜索框占位、分段按钮「全部 9｜只看可删 4」、筛完一个都没有时的一行、⌘F 菜单项。
+    public let filterPrompt: String
+    public let filterAll: Fmt1<Int>
+    public let filterRemovable: Fmt1<Int>
+    public let filterNoMatch: String
+    public let menuFind: String
+    /// Worktree 段标题右边的排序菜单。
+    public let sortWorktrees: String
+    public let sortStandard: String
+    public let sortLargest: String
+    public let sortLongestIdle: String
 
     // MARK: 体检一行
     public let noBackup: String
@@ -124,7 +144,9 @@ public struct Strings: Sendable {
     public let failedDetail: String
     public let chooseAnotherFolder: String
     public let emptyTitle: String
-    public let emptyDetail: String
+    /// 空状态的说明：那次往下找了几层、最多能选几层。
+    public let emptyDetail: Fmt2<Int, Int>
+    public let openSettings: String
     public let allCleanTitle: String
     public let allCleanHint: String
     public let pickRepoTitle: String
@@ -214,6 +236,13 @@ extension Strings {
         cliHint: "留空时用 App 自带的；想用自己编的版本再填路径",
         settingsDepth: "往下找几层",
         depthHint: "在扫描的文件夹里往下找几层仓库。仓库放在 ~/code/组织/仓库 这样的就选 2。找到仓库就不再进它里面",
+        settingsExclude: "排除路径",
+        excludeNone: "没有，扫描的文件夹里都扫",
+        excludeAdd: "添加…",
+        excludeRemoveHelp: "不再排除这个路径",
+        excludeHint: "这些路径本身和下面的仓库都跳过，有 worktree 在这里面的仓库也整个跳过：不报告、不体检、不删。适合 vendor、别人的 clone。和命令行的 --exclude 一样",
+        excludePanelPrompt: "排除",
+        excludePanelMessage: "选不想让 repo-tidy 碰的文件夹，可以多选",
 
         applyFailedTitle: "没删成",
         ok: "好",
@@ -225,6 +254,7 @@ extension Strings {
         groupFailed: "没扫成",
         groupClean: "干净",
         overviewCounts: .init { "\($0) 个仓库 · \($1) 个 worktree · \($2) 个分支" },
+        overviewExcluded: .init { "跳过 \($0) 个仓库（排除路径）" },
         nothingRemovable: "没有可删的项",
         scannedAtReadOnly: .init { "\($0) 扫描（扫描只读，不改任何文件）" },
         repoScanFailed: "没扫成",
@@ -257,6 +287,15 @@ extension Strings {
         lastActiveHelpBranch: "分支末端提交的时间",
         verdictRemovable: "可删",
         verdictKeep: "留着",
+        filterPrompt: "按名字或分支筛选",
+        filterAll: .init { "全部 \($0)" },
+        filterRemovable: .init { "只看可删 \($0)" },
+        filterNoMatch: "没有符合筛选的项",
+        menuFind: "筛选 worktree 和分支",
+        sortWorktrees: "Worktree 排序",
+        sortStandard: "默认顺序",
+        sortLargest: "最占地方的在前",
+        sortLongestIdle: "最久没动的在前",
 
         noBackup: "没有 backup 远程",
         backupUpToDate: "backup 已推到最新",
@@ -296,8 +335,13 @@ extension Strings {
         failedTitle: "扫描没完成",
         failedDetail: "repo-tidy 报了下面的错，什么都没删。",
         chooseAnotherFolder: "换个文件夹…",
-        emptyTitle: "这个文件夹下没有 git 仓库",
-        emptyDetail: "repo-tidy 扫你选的文件夹本身和它下面一层的文件夹。换成放仓库的那一层，比如 ~/projects。",
+        emptyTitle: "这个文件夹下没找到 git 仓库",
+        emptyDetail: .init { depth, max in
+            "repo-tidy 扫了这个文件夹本身和它下面 \(depth) 层的文件夹。\n"
+                + (depth < max ? "换成放仓库的文件夹（如 ~/projects），或在设置里把「往下找几层」调大，最多 \(max) 层。"
+                    : "\(max) 层是上限，换成离仓库更近的文件夹再扫。")
+        },
+        openSettings: "打开设置",
         allCleanTitle: "没有能删的",
         allCleanHint: "左边选一个仓库，能看到每一项为什么留着。",
         pickRepoTitle: "选一个仓库",
@@ -327,7 +371,7 @@ extension Strings {
         panelMissing: "没找到 repo-tidy 命令行工具，打开主窗口看怎么办。",
         panelScanning: .init { "正在扫描 \($0)…" },
         panelFailed: .init { "扫描没完成：\($0)" },
-        panelEmpty: .init { "\($0) 下没有 git 仓库" },
+        panelEmpty: .init { "\($0) 下没找到 git 仓库" },
         panelKept: .init { repos, keep, unmerged in
             "\(repos) 个仓库 · 留着 \(keep) 项" + (unmerged > 0 ? "，其中 \(unmerged) 项有未合并内容" : "")
         },
@@ -357,6 +401,13 @@ extension Strings {
         cliHint: "Leave empty to use the copy inside the app. Enter a path to use your own build.",
         settingsDepth: "Search depth",
         depthHint: "How many folder levels to look down for repositories. If they live in ~/code/org/repo, choose 2. Repositories found are not searched further.",
+        settingsExclude: "Excluded paths",
+        excludeNone: "None. Everything in the scanned folder is checked.",
+        excludeAdd: "Add…",
+        excludeRemoveHelp: "Stop excluding this path",
+        excludeHint: "These paths and the repositories below them are skipped, as is any repository with a worktree inside them: not reported, not checked, never deleted. Useful for vendor folders and other people's clones. Same as --exclude on the command line.",
+        excludePanelPrompt: "Exclude",
+        excludePanelMessage: "Choose folders repo-tidy should leave alone. You can pick several.",
 
         applyFailedTitle: "Couldn't Delete",
         ok: "OK",
@@ -370,6 +421,7 @@ extension Strings {
         overviewCounts: .init {
             "\(count($0, "repo")) · \(count($1, "worktree")) · \(count($2, "branch", "branches"))"
         },
+        overviewExcluded: .init { "Skipped \(count($0, "repo")) (excluded paths)" },
         nothingRemovable: "Nothing to remove",
         scannedAtReadOnly: .init { "Scanned at \($0) (read-only, nothing changed)" },
         repoScanFailed: "Scan failed",
@@ -405,6 +457,15 @@ extension Strings {
         lastActiveHelpBranch: "Time of the branch's latest commit",
         verdictRemovable: "Removable",
         verdictKeep: "Keep",
+        filterPrompt: "Filter by name or branch",
+        filterAll: .init { "All \($0)" },
+        filterRemovable: .init { "Removable only \($0)" },
+        filterNoMatch: "Nothing matches the filter",
+        menuFind: "Filter Worktrees and Branches",
+        sortWorktrees: "Sort Worktrees",
+        sortStandard: "Default Order",
+        sortLargest: "Largest First",
+        sortLongestIdle: "Longest Idle First",
 
         noBackup: "No backup remote",
         backupUpToDate: "backup is up to date",
@@ -444,8 +505,13 @@ extension Strings {
         failedTitle: "Scan Didn't Finish",
         failedDetail: "repo-tidy reported the error below. Nothing was deleted.",
         chooseAnotherFolder: "Choose Another Folder…",
-        emptyTitle: "No Git Repositories in This Folder",
-        emptyDetail: "repo-tidy scans the folder you choose and the folders one level below it. Choose the folder that holds your repositories, such as ~/projects.",
+        emptyTitle: "No Git Repositories Found in This Folder",
+        emptyDetail: .init { depth, max in
+            "repo-tidy scanned this folder and the folders up to \(count(depth, "level")) below it.\n"
+                + (depth < max ? "Choose the folder that holds your repositories, such as ~/projects. If they are nested deeper, increase Search depth in Settings (up to \(max))."
+                    : "\(max) is the limit. Choose a folder closer to your repositories.")
+        },
+        openSettings: "Open Settings",
         allCleanTitle: "Nothing to Remove",
         allCleanHint: "Select a repository on the left to see why each item is kept.",
         pickRepoTitle: "Select a Repository",
@@ -477,7 +543,7 @@ extension Strings {
         panelMissing: "repo-tidy command-line tool not found. Open the main window to fix it.",
         panelScanning: .init { "Scanning \($0)…" },
         panelFailed: .init { "Scan didn't finish: \($0)" },
-        panelEmpty: .init { "No git repositories in \($0)" },
+        panelEmpty: .init { "No git repositories found in \($0)" },
         panelKept: .init { repos, keep, unmerged in
             "\(count(repos, "repo")) · \(keep) kept" + (unmerged > 0 ? ", \(unmerged) with unmerged work" : "")
         },

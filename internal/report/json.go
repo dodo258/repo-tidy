@@ -38,7 +38,8 @@ type jsonTotals struct {
 	Unmerged           int         `json:"unmerged"`
 	FreeBytes          int64       `json:"free_bytes"`
 	Unmeasured         int         `json:"unmeasured"`
-	Filter             *jsonFilter `json:"filter"` // 没有筛选条件时为 null
+	Filter             *jsonFilter `json:"filter"`   // 没有筛选条件时为 null
+	Excluded           int         `json:"excluded"` // --exclude 跳过的仓库数，不算在 repos 里
 }
 
 type jsonFilter struct {
@@ -114,15 +115,15 @@ type jsonBranchSync struct {
 }
 
 // JSON 把和 Text 同样的判定、体检结果写成一个 JSON 文档（字段说明见 docs/reference.md「JSON 输出」）。
-// reps 是已经按 f 筛过的结果，f 写进 summary.filter。
-func JSON(w io.Writer, reps []Repo, now time.Time, f Filter) error {
+// reps 是已经按 f 筛过的结果，f 写进 summary.filter；excluded 是 --exclude 跳过的仓库数。
+func JSON(w io.Writer, reps []Repo, now time.Time, f Filter, excluded int) error {
 	o := Summarize(reps)
 	doc := jsonDoc{
 		Version: JSONVersion, GeneratedAt: now.Truncate(time.Second), Repos: []jsonRepo{},
 		Summary: jsonTotals{
 			Repos: o.Repos, Failed: o.Failed, Clean: o.Clean, Worktrees: o.Worktrees, Branches: o.Branches,
 			RemovableWorktrees: o.RemovableWT, RemovableBranches: o.RemovableBr, KeepWorktrees: o.KeptWT, KeepBranches: o.KeptBr,
-			Unmerged: o.Unmerged, FreeBytes: o.FreeBytes, Unmeasured: o.Unmeasured,
+			Unmerged: o.Unmerged, FreeBytes: o.FreeBytes, Unmeasured: o.Unmeasured, Excluded: excluded,
 		},
 	}
 	if f.On() {

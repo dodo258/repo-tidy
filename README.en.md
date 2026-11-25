@@ -9,7 +9,7 @@ Agents like Claude Code and Codex open a worktree and a branch for every task. A
 repo-tidy sorts every worktree and local branch into two groups:
 
 - **Removable**, with evidence: the commit on the default branch that already contains the work, or the remote ref it was pushed to;
-- **Keep**, with the reason: uncommitted changes, commits that are neither merged nor pushed, ignored files that can't be regenerated (`.env`), a lock, a rebase in progress…
+- **Keep**, with the reason: uncommitted changes, commits that are neither merged nor pushed, ignored files that can't be regenerated (`.env`), a lock (one whose holder is still running or isn't named; a lock left by a crashed agent session whose process has exited doesn't count), a rebase in progress…
 
 ![Mac app: repositories on the left, every item with its verdict and evidence on the right](docs/screenshots/en/main.png)
 
@@ -42,7 +42,7 @@ Each release ships a `SHA256SUMS` file for `shasum -a 256 -c`. If you download w
 go install github.com/dodo258/repo-tidy/cmd/repo-tidy@latest
 ```
 
-## Three ways to use it
+## Four ways to use it
 
 **1. See how messy all your projects are** (read-only)
 
@@ -78,6 +78,8 @@ Each removable item takes one line ending in a short form of its evidence: the d
 
 A directory is searched one level down by default. If your code lives in `~/code/<org>/<repo>`, add `--depth 2` (at most 4) to look further down. Once a repository is found it is not searched further (its worktrees and submodules are not separate repositories); hidden directories, `node_modules` and symlinks are skipped.
 
+To keep repo-tidy away from some repositories, skip them with `--exclude <path>` (repeatable; absolute, relative or `~/` paths), or list several in the `REPO_TIDY_EXCLUDE` environment variable, separated by colons; both are combined. The path itself and the repositories below it are skipped, as is any repository with a worktree under it: not reported, not checked, and `--apply` won't delete anything in it. The overview says "skipped N repos (--exclude)". For example: `repo-tidy --exclude ~/projects/vendor ~/projects`.
+
 When there are too many items, filter them: `--older-than 30d` (or `2w`) shows only items last active more than a month ago, and `--only branches` shows only local branches (`--only worktrees` only worktrees); the two can be combined. Filtered-out items aren't shown or counted in the overview, and `--apply` won't delete them; the overview ends with a "filtered" line naming the conditions. For example, to clean up only branches idle for a month: `repo-tidy --older-than 30d --only branches --apply ~/projects`.
 
 Each repository also gets a health check (report only): disk usage, uncommitted changes and stashes in the main worktree, ahead/behind its upstream, the last commit, and whether a backup remote is up to date (`--online` checks it over the network). The backup remote is `backup` unless you pass `--backup-remote <name>`; repositories without it simply skip this line, unless you passed `--backup-remote` explicitly, in which case a missing remote is reported.
@@ -100,7 +102,7 @@ repo-tidy --undo --apply    # recreate it: branches at their original commits, w
 
 `--undo <log>` picks which cleanup to undo. Branches and directories that already exist are skipped; commits already removed by `git gc` are reported.
 
-**3. Feed scripts and agents**
+**3. Feed scripts**
 
 ```bash
 repo-tidy --json ~/projects | jq .summary
@@ -116,16 +118,67 @@ repo-tidy --json ~/projects \
 
 Field reference, rules and exit codes: [docs/reference.md](docs/reference.md) (Chinese).
 
+**4. Let Claude Code or Codex do the cleanup**
+
+Don't let an agent improvise the deletion. [Someone](https://mergify.com/blog/the-day-my-ai-agent-deleted-29-git-worktrees) asked Claude Code to remove one stale worktree; it did, then offered to clean up the ones no longer needed, got a "Yeah go ahead", and looped over all 29 active worktrees with `--force`. Every uncommitted change was lost: `--force` skips exactly the check git has for that.
+
+Paste this into your project's `CLAUDE.md` (`AGENTS.md` for Codex and others), or into `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` to cover every project:
+
+````markdown
+## Cleaning up worktrees and local branches
+
+Use `repo-tidy`; never write your own deletion commands. If it isn't installed, stop and tell me; don't delete some other way.
+
+1. Look first, delete nothing. Save the result to a temporary file and note the path printed last:
+
+   ```bash
+   f=$(mktemp); repo-tidy --json "$(git rev-parse --show-toplevel)" > "$f"; echo "$f"
+   ```
+
+   List both the removable items (`verdict` is `removable`, with their `evidence`) and the kept ones (with their `reasons`), then stop and wait for my answer. A "clean up" or "go ahead" I said before seeing the list is not approval.
+2. Delete only what I approved after seeing the list, by feeding those items back unchanged from that same file; don't scan again:
+
+   ```bash
+   jq '{items: [.repos[] | (.worktrees[], .branches[]) | select(.verdict == "removable")]}' <that path> \
+     | repo-tidy --apply --json --select -
+   ```
+
+   If I approved only some, also filter by `.name` inside `select(...)`. A branch checked out in a worktree has to be deleted together with that worktree.
+3. Report how many were deleted (`deleted` / `target`), why each remaining item wasn't (`message`), and where the restore log is (`log`). To undo: `repo-tidy --undo <restore log> --apply`.
+
+Never:
+- delete worktrees or branches with `git worktree remove --force` (`-f`), `git branch -D` or `rm -rf`, or in a loop;
+- delete `keep` items, or try to make one removable by committing, stashing, deleting files, unlocking, killing processes or passing `--min-idle 0`.
+````
+
+The agent then deletes exactly what you saw: `--select` only accepts the commits on that list, so an item that got a new commit or a running process since then is not deleted.
+
+`CLAUDE.md` is only guidance, and an agent may not follow it. For Claude Code you can add a hard stop in the project's `.claude/settings.json` or in `~/.claude/settings.json` (if you already have `permissions.deny`, add the three rules to it):
+
+```json
+{
+  "permissions": {
+    "deny": [
+      "Bash(git *worktree remove *--force*)",
+      "Bash(git *worktree remove -f*)",
+      "Bash(git *worktree remove * -f*)"
+    ]
+  }
+}
+```
+
+It also blocks the command inside a `for` loop and in `bypassPermissions` mode (tested on 2.1.331). It does not catch other spellings such as `bash -c '…'` or `rm -rf`, so keep the text above too. repo-tidy is unaffected: it never removes worktrees with `--force`.
+
 ## Mac app
 
-`mac/` contains a native SwiftUI app (macOS 14+). Repositories on the left, sorted by mess; the selected repository's worktrees and branches on the right, each with its verdict and evidence. Only removable items can be checked. "Clean up" first lists every item and its evidence again, and deletes only after you confirm; the results sheet has "Undo This Cleanup", which runs the same `repo-tidy --undo`. A menu bar icon shows the number of removable items.
+`mac/` contains a native SwiftUI app (macOS 14+). Repositories on the left, sorted by mess; the selected repository's worktrees and branches on the right, each with its verdict and evidence. With many items, switch the right pane to "Removable only" or filter by name or branch (⌘F); filtering hides rows but keeps your checks. The menu in the Worktrees header sorts worktrees by size (largest first) or by last activity (longest idle first). Only removable items can be checked. "Clean up" first lists every item and its evidence again, and deletes only after you confirm; the results sheet has "Undo This Cleanup", which runs the same `repo-tidy --undo`. A menu bar icon shows the number of removable items.
 
 <p>
   <img src="docs/screenshots/en/confirm.png" width="49%" alt="Every item is listed again before deleting">
   <img src="docs/screenshots/en/main-dark.png" width="49%" alt="Dark mode">
 </p>
 
-No separate CLI install needed: the build puts a `repo-tidy` compiled from the same source (universal, Apple silicon and Intel) into `RepoTidy.app/Contents/Helpers/`, and the app does all judging and deleting through it — the UI has no logic of its own. To use your own build instead, set its path in Settings or set `REPO_TIDY_BIN`. "Search depth" in Settings is the same as `--depth`.
+No separate CLI install needed: the build puts a `repo-tidy` compiled from the same source (universal, Apple silicon and Intel) into `RepoTidy.app/Contents/Helpers/`, and the app does all judging and deleting through it — the UI has no logic of its own. To use your own build instead, set its path in Settings or set `REPO_TIDY_BIN`. "Search depth" in Settings is the same as `--depth`, and "Excluded paths" is the same as `--exclude` (add as many as you like; they are skipped when deleting too).
 
 The app is not signed or notarized yet; build it from source (Go 1.26 plus Xcode or a Swift 6 toolchain):
 

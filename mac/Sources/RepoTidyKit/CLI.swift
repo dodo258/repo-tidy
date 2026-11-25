@@ -96,9 +96,9 @@ public struct CLI: Sendable {
     }
 
     /// 只读扫描 `root`。扫到第几个仓库通过 `progress` 报出来（在后台线程调用）。
-    public func scan(root: String, depth: Int = 1, online: Bool = false,
+    public func scan(root: String, depth: Int = 1, excludes: [String] = [], online: Bool = false,
                      progress: @escaping @Sendable (ScanProgress) -> Void = { _ in }) async throws -> ScanResult {
-        let out = try await run(scanArgs(root: root, depth: depth, online: online), timeout: 600) { line in
+        let out = try await run(scanArgs(root: root, depth: depth, excludes: excludes, online: online), timeout: 600) { line in
             if let p = ScanProgress.parse(line) { progress(p) }
         }
         // 退出码 1、什么都没输出：这个目录下没有 git 仓库（docs/reference.md「JSON 输出」）
@@ -115,8 +115,8 @@ public struct CLI: Sendable {
         }
     }
 
-    /// 只删 `items`（必须是扫描结果里的可删项）。删前命令行会逐项重新判定。
-    public func apply(_ items: [Item]) async throws -> ApplyOutcome {
+    /// 只删 `items`（必须是扫描结果里的可删项）。删前命令行会逐项重新判定；落在 `excludes` 下的仓库不删。
+    public func apply(_ items: [Item], excludes: [String] = []) async throws -> ApplyOutcome {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("repo-tidy-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer {
@@ -125,7 +125,7 @@ public struct CLI: Sendable {
         }
         let file = dir.appendingPathComponent("select.json")
         try JSONEncoder().encode(Selection(items)).write(to: file)
-        return try Self.decodeResult(try await run(applyArgs(select: file.path), timeout: 600))
+        return try Self.decodeResult(try await run(applyArgs(select: file.path, excludes: excludes), timeout: 600))
     }
 
     /// 按删除时写的恢复日志，把删掉的分支和 worktree 建回原处（已经在的跳过）。
@@ -145,12 +145,18 @@ public struct CLI: Sendable {
         }
     }
 
-    func scanArgs(root: String, depth: Int, online: Bool) -> [String] {
-        ["--json", "--progress", "--lang", lang.rawValue, "--depth", String(depth)] + (online ? ["--online"] : []) + [root]
+    func scanArgs(root: String, depth: Int, excludes: [String] = [], online: Bool) -> [String] {
+        ["--json", "--progress", "--lang", lang.rawValue, "--depth", String(depth)] + Self.excludeArgs(excludes)
+            + (online ? ["--online"] : []) + [root]
     }
 
-    func applyArgs(select: String) -> [String] {
-        ["--apply", "--json", "--lang", lang.rawValue, "--select", select]
+    func applyArgs(select: String, excludes: [String] = []) -> [String] {
+        ["--apply", "--json", "--lang", lang.rawValue] + Self.excludeArgs(excludes) + ["--select", select]
+    }
+
+    /// 写成 `--exclude=路径`：路径以 `-` 开头也不会被当成别的参数。
+    static func excludeArgs(_ paths: [String]) -> [String] {
+        paths.map { "--exclude=" + $0 }
     }
 
     func undoArgs(log: String) -> [String] {

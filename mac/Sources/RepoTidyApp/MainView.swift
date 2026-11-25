@@ -13,7 +13,7 @@ struct MainView: View {
             case .missingCLI: MissingCLIView()
             case .scanning: ScanningView(root: store.scanRoot, progress: store.progress)
             case let .failed(msg): FailedView(message: msg)
-            case .empty: EmptyFolderView()
+            case let .empty(depth): EmptyFolderView(depth: depth)
             case .allClean, .hasRemovable: split
             }
         }
@@ -98,7 +98,7 @@ func chooseFolder(_ store: Store) {
     guard panel.runModal() == .OK, let url = panel.url else { return }
     store.scanRoot = url.path
     store.selectedRepoID = nil
-    store.refresh()
+    store.rescanForNewSettings()
 }
 
 struct ConfirmCleanKey: FocusedValueKey {
@@ -109,5 +109,17 @@ extension FocusedValues {
     var confirmClean: (() -> Void)? {
         get { self[ConfirmCleanKey.self] }
         set { self[ConfirmCleanKey.self] = newValue }
+    }
+}
+
+struct FindItemsKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    /// 右栏有项可筛时，⌘F 把光标放进搜索框。
+    var findItems: (() -> Void)? {
+        get { self[FindItemsKey.self] }
+        set { self[FindItemsKey.self] = newValue }
     }
 }

@@ -8,20 +8,63 @@ struct RepoDetail: View {
     let repo: Repo
     let onClean: () -> Void
 
+    /// 每加一次就把光标放进搜索框（⌘F）。
+    @State private var focusSearch = 0
+
+    /// 仓库标题和筛选条固定在上面，几十上百项时滚到哪都能改筛选。
     var body: some View {
-        List {
-            header
-                .listRowSeparator(.hidden)
-            if !repo.error.isEmpty {
-                Notice(text: L.repoFailedNotice(repo.error), tint: Theme.held)
-            } else if !repo.note.isEmpty {
-                Notice(text: repo.note, tint: .secondary)
+        ScrollViewReader { proxy in
+            List {
+                if !repo.error.isEmpty {
+                    Notice(text: L.repoFailedNotice(repo.error), tint: Theme.held)
+                } else if !repo.note.isEmpty {
+                    Notice(text: repo.note, tint: .secondary)
+                }
+                itemSection(L.sectionWorktrees, worktrees, empty: L.noWorktrees) {
+                    if repo.worktrees.count > 1 { sortMenu }
+                }
+                itemSection(L.sectionBranches, repo.branches, empty: L.noBranches) {}
             }
-            itemSection(L.sectionWorktrees, repo.worktrees, empty: L.noWorktrees)
-            itemSection(L.sectionBranches, repo.branches, empty: L.noBranches)
+            .listStyle(.inset(alternatesRowBackgrounds: false))
+            // 滚到中间时换了排序，回到排在最前的那一项。对齐到底边：它就在列表开头，滚不到那么远，停在最顶上；
+            // 对齐到顶边会被吸顶的段标题盖住
+            .onChange(of: store.worktreeSort) {
+                if let first = store.filter.apply(worktrees).first { proxy.scrollTo(first.id, anchor: .bottom) }
+            }
         }
-        .listStyle(.inset(alternatesRowBackgrounds: false))
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                header
+                if canFilter { filterBar }
+            }
+            .padding(.horizontal, Theme.pad)
+            .padding(.bottom, 10)
+            .background(.background)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) { actionBar }
+        .focusedSceneValue(\.findItems, canFilter ? { focusSearch += 1 } : nil)
+    }
+
+    private var worktrees: [Item] { store.worktreeSort.apply(repo.worktrees) }
+
+    /// 扫成了、有项可筛时才有筛选条。
+    private var canFilter: Bool { repo.error.isEmpty && !repo.items.isEmpty }
+
+    /// 「全部 9｜只看可删 4」和搜索框。两个数按搜索词筛过之后算。
+    private var filterBar: some View {
+        @Bindable var store = store
+        let matched = store.filter.matchingQuery(repo.items)
+        let removable = matched.filter(\.isRemovable).count
+        return HStack(spacing: 12) {
+            Picker(L.menuFind, selection: $store.filter.onlyRemovable) {
+                Text(L.filterAll(matched.count)).monospacedDigit().tag(false)
+                Text(L.filterRemovable(removable)).monospacedDigit().tag(true)
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Spacer(minLength: 12)
+            SearchField(text: $store.filter.query, prompt: L.filterPrompt, focusRequest: focusSearch)
+                .frame(maxWidth: 260)
+        }
     }
 
     private var header: some View {
@@ -41,7 +84,6 @@ struct RepoDetail: View {
             }
         }
         .padding(.top, 8)
-        .padding(.bottom, 4)
     }
 
     private var pathLine: String {
@@ -50,18 +92,33 @@ struct RepoDetail: View {
         return s
     }
 
+    /// Worktree 段标题右边的排序菜单，对着下面的时间和大小两列。
+    private var sortMenu: some View {
+        @Bindable var store = store
+        return Picker(L.sortWorktrees, selection: $store.worktreeSort) {
+            Text(L.sortStandard).tag(WorktreeSort.standard)
+            Text(L.sortLargest).tag(WorktreeSort.largest)
+            Text(L.sortLongestIdle).tag(WorktreeSort.longestIdle)
+        }
+        .pickerStyle(.menu).buttonStyle(.borderless).controlSize(.small).labelsHidden().fixedSize()
+        .help(L.sortWorktrees)
+    }
+
     @ViewBuilder
-    private func itemSection(_ title: String, _ items: [Item], empty: String) -> some View {
+    private func itemSection(_ title: String, _ items: [Item], empty: String,
+                             @ViewBuilder trailing: () -> some View) -> some View {
+        let shown = store.filter.apply(items)
         Section {
-            if items.isEmpty {
-                Text(empty).font(Theme.note).foregroundStyle(.tertiary)
+            if shown.isEmpty {
+                Text(items.isEmpty ? empty : L.filterNoMatch).font(Theme.note).foregroundStyle(.tertiary)
             }
-            ForEach(items) { ItemRow(item: $0) }
+            ForEach(shown) { ItemRow(item: $0) }
         } header: {
             HStack(spacing: 8) {
                 Text(title).font(Theme.body.weight(.semibold)).foregroundStyle(.primary)
-                let r = items.filter(\.isRemovable).count
-                Text(L.sectionCounts(r, items.count - r)).font(Theme.meta).foregroundStyle(.secondary)
+                Text(store.filter.sectionCounts(items)).font(Theme.meta).foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                trailing()
             }
             .padding(.top, 6)
         }
@@ -186,29 +243,10 @@ struct HealthLine: View {
     let health: Health
 
     var body: some View {
-        let parts = Self.parts(health)
+        let parts = health.summaryParts
         if !parts.isEmpty {
             Text(parts.joined(separator: " · ")).font(Theme.note).foregroundStyle(.secondary)
         }
-    }
-
-    static func parts(_ h: Health) -> [String] {
-        var p: [String] = []
-        if !h.backup.present {
-            p.append(L.noBackup)
-        } else if h.backup.stale.isEmpty {
-            p.append(L.backupUpToDate)
-        } else {
-            p.append(L.backupStale(h.backup.stale.count))
-        }
-        if h.changes > 0 { p.append(L.uncommitted(h.changes)) }
-        if h.stashes > 0 { p.append(L.stashes(h.stashes)) }
-        if h.ahead > 0 || h.behind > 0 { p.append(L.aheadBehind(h.ahead, h.behind)) }
-        if let t = h.lastCommit {
-            let ago = Format.ago(t)
-            p.append(h.lastCommitBranch.isEmpty ? L.lastCommit(ago) : L.lastCommitOn(ago, h.lastCommitBranch))
-        }
-        return p
     }
 }
 
@@ -222,5 +260,44 @@ struct Notice: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: Theme.blockRadius).strokeBorder(tint.opacity(0.4)))
             .textSelection(.enabled)
+    }
+}
+
+/// 系统搜索框：放大镜、清除按钮、Esc 清空都是 NSSearchField 自带的。`focusRequest` 变一次就把光标放进来。
+struct SearchField: NSViewRepresentable {
+    @Binding var text: String
+    let prompt: String
+    let focusRequest: Int
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.sendsSearchStringImmediately = true
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.changed(_:))
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.text = $text
+        if field.stringValue != text { field.stringValue = text }
+        field.placeholderString = prompt
+        if context.coordinator.focusRequest != focusRequest {
+            context.coordinator.focusRequest = focusRequest
+            field.window?.makeFirstResponder(field)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text, focusRequest: focusRequest) }
+
+    @MainActor final class Coordinator: NSObject {
+        var text: Binding<String>
+        var focusRequest: Int
+
+        init(text: Binding<String>, focusRequest: Int) {
+            self.text = text
+            self.focusRequest = focusRequest
+        }
+
+        @objc func changed(_ sender: NSSearchField) { text.wrappedValue = sender.stringValue }
     }
 }

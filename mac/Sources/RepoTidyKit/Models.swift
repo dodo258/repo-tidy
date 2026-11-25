@@ -23,6 +23,8 @@ public struct Summary: Decodable, Sendable, Equatable {
     public var unmerged: Int
     public var freeBytes: Int64
     public var unmeasured: Int
+    /// 排除路径（`--exclude`）跳过了几个仓库，不算在 `repos` 里。旧版命令行没有这个字段。
+    public var excluded: Int?
 
     public var removable: Int { removableWorktrees + removableBranches }
 
@@ -102,6 +104,8 @@ public struct Health: Decodable, Sendable, Equatable {
     public var errors: [String]
 
     public struct Backup: Decodable, Sendable, Equatable {
+        /// 备份远程是用户显式指定的（`--backup-remote`）：只有这时仓库里没有它才值得提。
+        public var required: Bool
         public var present: Bool
         public var stale: [Stale]
     }
@@ -109,6 +113,27 @@ public struct Health: Decodable, Sendable, Equatable {
     public struct Stale: Decodable, Sendable, Equatable {
         public var branch: String
         public var state: String
+    }
+
+    /// 仓库详情里那一行体检的各段文字。和命令行一样：仓库里没有备份远程时，
+    /// 只有显式指定了才写，不然别人的仓库每个都会多一句噪音。
+    public var summaryParts: [String] {
+        var p: [String] = []
+        if !backup.present {
+            if backup.required { p.append(L.noBackup) }
+        } else if backup.stale.isEmpty {
+            p.append(L.backupUpToDate)
+        } else {
+            p.append(L.backupStale(backup.stale.count))
+        }
+        if changes > 0 { p.append(L.uncommitted(changes)) }
+        if stashes > 0 { p.append(L.stashes(stashes)) }
+        if ahead > 0 || behind > 0 { p.append(L.aheadBehind(ahead, behind)) }
+        if let t = lastCommit {
+            let ago = Format.ago(t)
+            p.append(lastCommitBranch.isEmpty ? L.lastCommit(ago) : L.lastCommitOn(ago, lastCommitBranch))
+        }
+        return p
     }
 }
 

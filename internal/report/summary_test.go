@@ -60,7 +60,7 @@ func TestSummarizeAndSort(t *testing.T) {
 	}
 
 	var w bytes.Buffer
-	Text(&w, reps, time.Now(), "", false, msg.ZH, Filter{})
+	Text(&w, reps, time.Now(), "", false, msg.ZH, Filter{}, 0)
 	s := w.String()
 	for _, line := range []string{
 		"总览  扫了 4 个仓库（1 个干净、1 个扫描失败） · 附加 worktree 4 个 · 本地分支 3 个",

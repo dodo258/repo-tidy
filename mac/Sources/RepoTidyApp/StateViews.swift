@@ -80,11 +80,13 @@ struct FailedView: View {
 
 struct EmptyFolderView: View {
     @Environment(Store.self) private var store
+    let depth: Int
 
     var body: some View {
-        StatePage(title: L.emptyTitle, path: store.scanRoot, detail: L.emptyDetail) {
+        StatePage(title: L.emptyTitle, path: store.scanRoot, detail: L.emptyDetail(depth, Store.depthRange.upperBound)) {
             HStack {
                 Button(L.chooseAnotherFolder) { chooseFolder(store) }.keyboardShortcut(.defaultAction)
+                SettingsLink { Text(L.openSettings) }
                 Button(L.rescan) { store.refresh() }
             }
         }

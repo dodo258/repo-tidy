@@ -47,6 +47,7 @@ type Item struct {
 	LastActive time.Time
 	Remote     string // Basis 为 Pushed 时：远程名
 	RemoteRef  string // Basis 为 Pushed 时：远程上的引用，如 refs/heads/agent/x
+	StaleLock  string // worktree 锁着，但锁原因里写的持锁进程都已退出：原来的锁原因。删之前要先解锁
 }
 
 // RepoReport 是一个仓库的判定结果。
@@ -88,6 +89,7 @@ func Inspect(ctx context.Context, dir string, opts Options) (RepoReport, error) 
 	c := &checker{
 		ctx:      ctx,
 		root:     root,
+		common:   common,
 		objEnv:   []string{"GIT_OBJECT_DIRECTORY=" + tmpObj, "GIT_ALTERNATE_OBJECT_DIRECTORIES=" + filepath.Join(common, "objects")},
 		trees:    map[string]string{},
 		subjects: map[string]string{},
@@ -201,6 +203,7 @@ type branchRef struct {
 type checker struct {
 	ctx          context.Context
 	root         string
+	common       string // git 公共目录（绝对路径），附加 worktree 的登记在它的 worktrees/ 下
 	def          string // 默认分支的显示名：main，或远程跟踪引用 origin/main
 	defRef       string // 默认分支的完整引用：refs/heads/main 或 refs/remotes/origin/main
 	defTip       string

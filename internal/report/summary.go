@@ -112,8 +112,8 @@ func Summarize(reps []Repo) Overview {
 	return o
 }
 
-// overview 输出报告开头的总览；有筛选条件时另起一行注明「已筛选」和条件。
-func overview(w io.Writer, t *msg.Text, o Overview, f Filter) {
+// overview 输出报告开头的总览；--exclude 跳过了仓库、有筛选条件时各另起一行注明。
+func overview(w io.Writer, t *msg.Text, o Overview, f Filter, excluded int) {
 	scanned := t.OverviewScanned.N(o.Repos)
 	var notes []string
 	if o.Clean > 0 {
@@ -137,6 +137,9 @@ func overview(w io.Writer, t *msg.Text, o Overview, f Filter) {
 		kept += fmt.Sprintf(t.KeptUnmerged, o.Unmerged)
 	}
 	fmt.Fprintln(w, kept)
+	if excluded > 0 {
+		fmt.Fprint(w, t.ExcludedLine.N(excluded))
+	}
 	if f.On() {
 		fmt.Fprintf(w, t.FilterLine, filterDesc(t, f))
 	}

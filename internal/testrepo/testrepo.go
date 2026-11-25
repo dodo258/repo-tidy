@@ -144,3 +144,14 @@ func Idle(t *testing.T, wt string) {
 		}
 	}
 }
+
+// DeadPID 跑一个马上退出的进程，等它退出后返回它的 pid：一个刚确认已不在的进程号，
+// 用来造「持锁进程已退出」的锁。
+func DeadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("跑 true：%v", err)
+	}
+	return cmd.Process.Pid
+}

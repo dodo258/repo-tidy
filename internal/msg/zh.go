@@ -10,7 +10,7 @@ var zh = Text{
 	Detached:  "分离头指针",
 	Kinds:     struct{ Worktree, Branch string }{"worktree", "分支"},
 
-	Usage: `用法：repo-tidy [--apply | --json] [--verbose] [--online] [--backup-remote 名字] [--progress] [--min-idle 时长] [--depth N] [--older-than 时长] [--only worktrees|branches] [--lang zh|en] [路径...]
+	Usage: `用法：repo-tidy [--apply [--select 文件|-] | --json] [--verbose] [--online] [--backup-remote 名字] [--progress] [--min-idle 时长] [--depth N] [--exclude 路径]... [--older-than 时长] [--only worktrees|branches] [--lang zh|en] [路径...]
       repo-tidy --undo [日志] [--apply] [--json] [--lang zh|en]
 
 扫描仓库里的附加 worktree 和本地分支，分成「可删」（附证据）和「留着」（附原因）；
@@ -21,6 +21,9 @@ var zh = Text{
 
   --apply    删除标「可删」的项。删前逐项重新判定；靠「已推到远程」可删的先联网确认。
              恢复命令写进 ${XDG_STATE_HOME:-~/.local/state}/repo-tidy/apply-<时间>.log
+  --select 文件|-
+             和 --apply 一起用：只删文件里列的项（- 从标准输入读）。格式是 {"items": [...]}，每一项从
+             --json 的输出里原样挑；列完之后变了的不删。不给路径时只扫这些项所在的仓库。
   --undo [日志]
              按恢复日志把 --apply 删掉的分支和 worktree 建回来（不给日志就用
              ${XDG_STATE_HOME:-~/.local/state}/repo-tidy/ 里最新的一份）。默认只列出要恢复的，
@@ -38,6 +41,11 @@ var zh = Text{
              写法如 45m、2h；0 关掉这条）。有进程的工作目录在 worktree 里的，不管多久都留着。
   --depth N  给的是目录时往下找几层仓库（默认 1，最多 4）。如 ~/code/<组织>/<仓库> 用 --depth 2。
              找到仓库就不再进它里面；跳过隐藏目录、node_modules 和符号链接。
+  --exclude 路径
+             跳过这个路径本身和它下面的仓库（可以写多次；认绝对路径、相对当前目录的路径和 ~/）。
+             仓库的任何一个工作区（主工作区或附加 worktree）在这个路径下，整个仓库都跳过：
+             不报告、不体检，--apply（含 --select）也不删。总览注明「跳过 N 个仓库（--exclude）」。
+             环境变量 REPO_TIDY_EXCLUDE 也认，多个路径用冒号隔开，和命令行的合在一起。
   --older-than 时长
              只看最后活动在这么久之前的 worktree 和分支（写法如 30d、2w、36h）。
   --only worktrees|branches
@@ -55,6 +63,8 @@ var zh = Text{
 	BadOlderThan:     "--older-than 要写成正数加单位，如 30d、2w、36h，不认 %q",
 	BadOnly:          "--only 只能是 worktrees 或 branches，不认 %q",
 	UndoWithFilter:   "--undo 不能和 --older-than、--only 一起用",
+	UndoWithExclude:  "--undo 不能和 --exclude 一起用",
+	EmptyExclude:     "--exclude 不能是空的",
 	SelectNeedsApply: "--select 只能和 --apply 一起用",
 	NoRepos:          "这些路径下没有找到 git 仓库",
 	WriteJSON:        "写 JSON：%v",
@@ -105,6 +115,7 @@ var zh = Text{
 	RemovableLine:   "      可删 %d 项（worktree %d、分支 %d），%s\n",
 	KeptLine:        "      留着 %d 项（worktree %d、分支 %d）",
 	KeptUnmerged:    "，其中 %d 项有未合并内容",
+	ExcludedLine:    same("      跳过 %d 个仓库（--exclude）\n"),
 	FilterLine:      "      已筛选：%s（筛掉的项不显示、不计入上面的数字，--apply 也不删）\n",
 	FilterOlder:     "最后活动在 %s 之前",
 	FilterOnlyWT:    "只看附加 worktree",
@@ -186,24 +197,26 @@ var zh = Text{
 	ListTracking:      "查远程跟踪引用：%w",
 	CountUnique:       "数独有提交：%w",
 
-	EvSame:          "和 %s 指向同一个提交 %s",
-	EvSameShort:     "等于 %s %s",
-	EvOnDef:         "已在 %s 上：提交 %s",
-	EvOnDefShort:    "已在 %s %s",
-	EvMerged:        "已合并进 %s：提交 %s",
-	EvMergedShort:   "合并进 %s %s",
-	EvSquash:        "内容已 squash 进 %s：提交 %s",
-	EvSquashShort:   "squash 进 %s %s",
-	EvRebase:        "提交都已 rebase 进 %s：%s",
-	EvRebaseShort:   "rebase 进 %s %s",
-	EvNoNet:         "相对 %s 没有净改动",
-	EvContent:       "内容已全部在 %s 里：从提交 %s 起，合并它不再带来改动",
-	EvContentShort:  "内容已在 %s %s",
-	EvPushed:        "已推到 %s/%s（本地记录的远程提交 %s 包含它）",
-	EvPushedShort:   "已推 %s/%s",
-	EvPrunable:      "目录已不存在，只清掉 git 里的登记",
-	EvPrunableShort: "目录已不在，只清登记",
-	EvRemoveWTFirst: "；先删检出它的 worktree",
+	EvSame:           "和 %s 指向同一个提交 %s",
+	EvSameShort:      "等于 %s %s",
+	EvOnDef:          "已在 %s 上：提交 %s",
+	EvOnDefShort:     "已在 %s %s",
+	EvMerged:         "已合并进 %s：提交 %s",
+	EvMergedShort:    "合并进 %s %s",
+	EvSquash:         "内容已 squash 进 %s：提交 %s",
+	EvSquashShort:    "squash 进 %s %s",
+	EvRebase:         "提交都已 rebase 进 %s：%s",
+	EvRebaseShort:    "rebase 进 %s %s",
+	EvNoNet:          "相对 %s 没有净改动",
+	EvContent:        "内容已全部在 %s 里：从提交 %s 起，合并它不再带来改动",
+	EvContentShort:   "内容已在 %s %s",
+	EvPushed:         "已推到 %s/%s（本地记录的远程提交 %s 包含它）",
+	EvPushedShort:    "已推 %s/%s",
+	EvPrunable:       "目录已不存在，只清掉 git 里的登记",
+	EvPrunableShort:  "目录已不在，只清登记",
+	EvRemoveWTFirst:  "；先删检出它的 worktree",
+	EvStaleLock:      "；锁已失效：持锁进程（pid %s）已退出，删时先解锁",
+	EvStaleLockShort: "；锁失效 pid %s",
 
 	MainBranch:      "主工作区当前检出的分支",
 	InKeptWorktree:  "在留着的 worktree 里检出：%s",
@@ -212,6 +225,7 @@ var zh = Text{
 	NotOnDefault:    "%s既不在 %s 也没推到任何远程：%s",
 	Locked:          "已锁定",
 	LockedWhy:       "已锁定：%s",
+	LockedLive:      "已锁定，持锁进程还在运行（pid %s）：%s",
 	CantRead:        "读不了这个 worktree，保守留着：%s",
 	InProgress:      "有做到一半的 %s",
 	RebaseOrAm:      "rebase 或 am",
@@ -234,9 +248,13 @@ var zh = Text{
 	Gone:           "已经不在了",
 	ChangedKeep:    "状态和报告时不一样了，这次不动：现在要留着，%s",
 	Changed:        "状态和报告时不一样了，这次不动",
-	Pruned:         "清掉了登记",
-	Removed:        "删了",
+	Pruned:         "清掉了登记，%s",
+	WasBranch:      "原来指向 %s",
+	WasOnBranch:    "原来检出分支 %s @ %s",
+	WasDetached:    "原来是分离头指针 @ %s",
+	WasNoCommit:    "原来没有指向任何提交",
 	Failed:         "失败：%s",
+	RelockFailed:   "%s；按原来的原因锁回也失败了：%s",
 	ConfirmFailed:  "联网确认 %s 失败，不能证明远程还有这个提交：%s",
 	RemoteGone:     "远程 %s 上已经没有 %s，不能证明安全",
 	RemoteUnknown:  "远程 %s 的 %s 已变成本地没有的提交 %s，先 fetch 再来",

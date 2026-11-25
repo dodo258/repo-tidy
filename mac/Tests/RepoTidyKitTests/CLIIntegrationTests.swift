@@ -38,14 +38,28 @@ func scanThenApplySelectedAgainstRealCLI() async throws {
         return
     }
     let todo = try #require(before.repos.first { $0.name == "todo-app" })
+    #expect(before.summary.excluded == 0 && before.repos.contains { $0.name == "site" })
+
+    // 排除 site：它不出现在报告里，总览记跳过 1 个
+    guard case let .report(skipped) = try await cli.scan(root: base + "/projects", excludes: [base + "/projects/site"]) else {
+        Issue.record("排除一个后应该还有仓库")
+        return
+    }
+    #expect(skipped.summary.excluded == 1 && !skipped.repos.contains { $0.name == "site" })
+    #expect(skipped.repos.contains { $0.name == "todo-app" })
     #expect(before.repos.first?.name == "todo-app") // 最乱的排第一
     let removable = todo.items.filter(\.isRemovable)
     #expect(removable.count == 4)
     // 只勾一个 squash 进 main 的分支
     let pick = try #require(removable.first { $0.name == "agent/1107-fix-timezone" })
+    // 勾的项所在的仓库被排除了：删除时命令行再挡一次，不删
+    let blocked = try await cli.apply([pick], excludes: [todo.root])
+    #expect(blocked.deleted == 0 && blocked.target == 0)
     let outcome = try await cli.apply([pick])
     #expect(outcome.deleted == 1 && outcome.target == 1 && !outcome.log.isEmpty)
     #expect(outcome.results.map(\.name) == ["agent/1107-fix-timezone"])
+    // 结果里写原来指向的提交，不撤销也能手动恢复
+    #expect(outcome.results.first?.message.contains(String(pick.head.prefix(8))) == true)
 
     guard case let .report(after) = try await cli.scan(root: base + "/projects") else {
         Issue.record("再扫描应该还有仓库")

@@ -12,18 +12,23 @@ final class FakeBackend: Backend, @unchecked Sendable {
 
     var progress: [ScanProgress] = []
     var depths: [Int] = []
+    var excludes: [[String]] = []
+    var appliedExcludes: [[String]] = []
     /// 报完进度后等多久再返回结果，给测试看扫描中的状态。
     var delay: Duration = .zero
 
-    func scan(root: String, depth: Int, online: Bool, progress report: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult {
+    func scan(root: String, depth: Int, excludes: [String], online: Bool,
+              progress report: @escaping @Sendable (ScanProgress) -> Void) async throws -> ScanResult {
         depths.append(depth)
+        self.excludes.append(excludes)
         for p in progress { report(p) }
         if delay > .zero { try await Task.sleep(for: delay) }
         return try result.get()
     }
 
-    func apply(_ items: [Item]) async throws -> ApplyOutcome {
+    func apply(_ items: [Item], excludes: [String]) async throws -> ApplyOutcome {
         applied.append(items)
+        appliedExcludes.append(excludes)
         return ApplyOutcome(log: "/s/log", target: items.count, deleted: items.count, results: [], errors: [])
     }
 
@@ -55,7 +60,7 @@ func settle(_ s: Store) async {
     s.refresh()
     #expect(s.scanning)
     await settle(s)
-    #expect(s.screen == .empty)
+    #expect(s.screen == .empty(depth: 1))
 
     fake.result = .failure(CLIError.failed(code: 2, message: "路径 /x：不存在"))
     s.refresh()
@@ -184,4 +189,61 @@ func settle(_ s: Store) async {
     #expect(Store(defaults: defaults, makeBackend: { _ in nil }).scanDepth == 3)
     defaults.set(9, forKey: "scanDepth") // 超出范围的旧值回到默认
     #expect(Store(defaults: defaults, makeBackend: { _ in nil }).scanDepth == 1)
+}
+
+@MainActor @Test func excludePathsAreSavedAndPassedToScanAndApply() async throws {
+    let defaults = try #require(UserDefaults(suiteName: "repo-tidy-test-\(UUID().uuidString)"))
+    let fake = FakeBackend(.success(.report(try decodeSample())))
+    let s = Store(defaults: defaults, makeBackend: { _ in fake })
+    #expect(s.excludePaths.isEmpty)
+    s.refresh()
+    await settle(s)
+    // 加了就重新扫描；重复的、空的不加，没有变化不重扫
+    s.addExcludes(["/p/vendor", "", "/p/other clone", "/p/vendor"])
+    await settle(s)
+    #expect(s.excludePaths == ["/p/vendor", "/p/other clone"])
+    s.addExcludes(["/p/vendor"])
+    await settle(s)
+    #expect(fake.excludes == [[], ["/p/vendor", "/p/other clone"]])
+    // 删除也带上，命令行删前再挡一次
+    let removable = s.repos.flatMap(\.items).filter(\.isRemovable)
+    let item = try #require(removable.first)
+    s.toggle(item)
+    await s.applyChecked()
+    await settle(s)
+    #expect(fake.appliedExcludes == [["/p/vendor", "/p/other clone"]])
+    // 存进设置，下次打开还在；移掉一个也重新扫描
+    #expect(Store(defaults: defaults, makeBackend: { _ in nil }).excludePaths == ["/p/vendor", "/p/other clone"])
+    s.removeExclude("/p/vendor")
+    await settle(s)
+    #expect(s.excludePaths == ["/p/other clone"])
+    #expect(fake.excludes.last == ["/p/other clone"])
+    #expect(Store(defaults: defaults, makeBackend: { _ in nil }).excludePaths == ["/p/other clone"])
+}
+
+@MainActor @Test func excludeChangedWhileScanningRescansWhenDone() async throws {
+    let fake = FakeBackend(.success(.noRepos))
+    fake.delay = .milliseconds(200)
+    let s = makeStore(fake)
+    s.refresh()
+    #expect(s.scanning)
+    s.addExcludes(["/p/vendor"]) // 正在扫：这次按旧设置，扫完再扫一次
+    for _ in 0..<200 where fake.excludes.count < 2 || s.scanning { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(fake.excludes == [[], ["/p/vendor"]])
+    #expect(!s.scanning)
+}
+
+@MainActor @Test func emptyScreenSaysDepthOfTheFinishedScan() async throws {
+    let fake = FakeBackend(.success(.noRepos))
+    fake.delay = .milliseconds(500)
+    let s = makeStore(fake)
+    s.scanDepth = 2
+    s.refresh()
+    s.scanDepth = 4
+    s.rescanForNewSettings() // 正在扫：这次按 2 层，扫完再按 4 层扫一次
+    for _ in 0..<200 where fake.depths.count < 2 { try await Task.sleep(for: .milliseconds(10)) }
+    // 4 层的还没扫完，不能说扫了 4 层
+    #expect(s.scanning && s.screen == .empty(depth: 2))
+    for _ in 0..<200 where s.scanning { try await Task.sleep(for: .milliseconds(10)) }
+    #expect(fake.depths == [2, 4] && s.screen == .empty(depth: 4))
 }

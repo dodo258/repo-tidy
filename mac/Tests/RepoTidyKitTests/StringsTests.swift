@@ -60,6 +60,21 @@ func hasCJK(_ s: String) -> Bool {
     #expect(en.confirmTitle(1) == "Delete 1 Item?")
 }
 
+@Test func emptyDetailFollowsDepth() {
+    let zh = Strings.zh, en = Strings.en
+    for depth in 1...3 {
+        #expect(zh.emptyDetail(depth, 4).contains("下面 \(depth) 层"))
+        // 还能调大：说的是设置里那一项的名字，和按钮、设置页对得上
+        #expect(zh.emptyDetail(depth, 4).contains("「\(zh.settingsDepth)」调大"))
+        #expect(en.emptyDetail(depth, 4).contains("increase \(en.settingsDepth) in Settings"))
+    }
+    #expect(en.emptyDetail(1, 4).contains("up to 1 level below"))
+    #expect(en.emptyDetail(2, 4).contains("up to 2 levels below"))
+    // 已经是上限：不叫人再调大
+    #expect(zh.emptyDetail(4, 4).contains("下面 4 层") && !zh.emptyDetail(4, 4).contains("调大"))
+    #expect(en.emptyDetail(4, 4).contains("up to 4 levels below") && !en.emptyDetail(4, 4).contains("increase"))
+}
+
 @Test func detectsLanguageFromPreferredList() {
     #expect(Lang.detect(["zh-Hans-CN", "en-US"]) == .zh)
     #expect(Lang.detect(["zh-Hant-TW"]) == .zh)
@@ -76,4 +91,9 @@ func hasCJK(_ s: String) -> Bool {
     #expect(zh.scanArgs(root: "/p", depth: 3, online: true)
         == ["--json", "--progress", "--lang", "zh", "--depth", "3", "--online", "/p"])
     #expect(en.applyArgs(select: "/t/s.json") == ["--apply", "--json", "--lang", "en", "--select", "/t/s.json"])
+    // 排除路径写成 --exclude=路径，以 - 开头的路径也不会被当成参数
+    #expect(zh.scanArgs(root: "/p", depth: 1, excludes: ["/p/vendor", "-odd"], online: false)
+        == ["--json", "--progress", "--lang", "zh", "--depth", "1", "--exclude=/p/vendor", "--exclude=-odd", "/p"])
+    #expect(zh.applyArgs(select: "/t/s.json", excludes: ["/p/vendor"])
+        == ["--apply", "--json", "--lang", "zh", "--exclude=/p/vendor", "--select", "/t/s.json"])
 }

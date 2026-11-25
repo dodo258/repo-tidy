@@ -19,7 +19,7 @@ type Result struct {
 	Kind string
 	Name string
 	Done bool
-	Msg  string // 做了什么，或为什么没做
+	Msg  string // 删了的：原来指向哪个提交；没删的：为什么
 }
 
 // Apply 对 prev（之前给用户看的报告）里可删的项重新判定后删除，恢复命令写进 log。
@@ -81,32 +81,66 @@ func Apply(ctx context.Context, prev judge.RepoReport, opts judge.Options, log i
 			worktrees = append(worktrees, w)
 		}
 	}
-	// 1. 目录已不存在的 worktree：清登记（git worktree prune 只清这类，跳过锁定的）
+	// 1. 目录已不存在的 worktree：清登记（git worktree prune 只清这类，跳过锁定的，锁已失效的先解锁）
 	if len(prunable) > 0 {
+		var unlocked []judge.Item
 		for _, w := range prunable {
+			if err := unlockStale(ctx, root, w); err != nil {
+				results = append(results, outcome(t, judge.KindWorktree, w.Name, err, ""))
+				continue
+			}
 			fmt.Fprintf(log, t.LogPruned, w.Name, refDesc(t, w))
 			fmt.Fprintf(log, t.LogRestore, restoreWorktree(root, w))
+			unlocked = append(unlocked, w)
 		}
-		_, err := gitx.Run(ctx, root, "worktree", "prune")
-		for _, w := range prunable {
-			results = append(results, outcome(t, judge.KindWorktree, w.Name, err, t.Pruned))
+		if len(unlocked) > 0 {
+			_, err := gitx.Run(ctx, root, "worktree", "prune")
+			for _, w := range unlocked {
+				results = append(results, outcome(t, judge.KindWorktree, w.Name, relockIfFailed(ctx, t, root, w, err), fmt.Sprintf(t.Pruned, was(t, w))))
+			}
 		}
 	}
 	// 2. 其余 worktree：不加 --force，git 自己还会再拦一次有改动的
 	for _, w := range worktrees {
+		if err := unlockStale(ctx, root, w); err != nil {
+			results = append(results, outcome(t, judge.KindWorktree, w.Name, err, ""))
+			continue
+		}
 		fmt.Fprintf(log, t.LogWorktree, w.Name, refDesc(t, w), w.Evidence)
 		fmt.Fprintf(log, t.LogRestore, restoreWorktree(root, w))
 		_, err := gitx.Run(ctx, root, "worktree", "remove", w.Name)
-		results = append(results, outcome(t, judge.KindWorktree, w.Name, err, t.Removed))
+		err = relockIfFailed(ctx, t, root, w, err)
+		results = append(results, outcome(t, judge.KindWorktree, w.Name, err, was(t, w)))
 	}
 	// 3. 分支：检出它的 worktree 没删成时，git 会拒绝删分支
 	for _, b := range pick(judge.KindBranch, prev.Branches, fresh.Branches) {
 		fmt.Fprintf(log, t.LogBranch, b.Name, b.Head, b.Evidence)
 		fmt.Fprintf(log, t.LogRestore, fmt.Sprintf("git -C %s branch %s %s", quote(root), quote(b.Name), b.Head))
 		_, err := gitx.Run(ctx, root, "branch", "-D", "--", b.Name)
-		results = append(results, outcome(t, judge.KindBranch, b.Name, err, t.Removed))
+		results = append(results, outcome(t, judge.KindBranch, b.Name, err, was(t, b)))
 	}
 	return results, nil
+}
+
+// unlockStale 解开锁已失效（持锁进程都已退出，Apply 前刚重新判定过）的 worktree 的锁；没锁的不动。
+func unlockStale(ctx context.Context, root string, w judge.Item) error {
+	if w.StaleLock == "" {
+		return nil
+	}
+	_, err := gitx.Run(ctx, root, "worktree", "unlock", w.Name)
+	return err
+}
+
+// relockIfFailed 在解了锁却没删成（err 不为空）时按原来的锁原因锁回去，让仓库保持删之前的样子；
+// 锁回也失败时把两个错误合在一起返回。
+func relockIfFailed(ctx context.Context, t *msg.Text, root string, w judge.Item, err error) error {
+	if err == nil || w.StaleLock == "" {
+		return err
+	}
+	if _, lerr := gitx.Run(ctx, root, "worktree", "lock", "--reason", w.StaleLock, w.Name); lerr != nil {
+		return fmt.Errorf(t.RelockFailed, firstLine(err.Error()), firstLine(lerr.Error()))
+	}
+	return err
 }
 
 func byName(list []judge.Item, name string) (judge.Item, bool) {
@@ -149,6 +183,22 @@ func outcome(t *msg.Text, kind, name string, err error, ok string) Result {
 		return Result{kind, name, false, fmt.Sprintf(t.Failed, firstLine(err.Error()))}
 	}
 	return Result{kind, name, true, ok}
+}
+
+// was 说明删掉的项原来指向哪个提交（短提交号），不撤销也能照着手动建回来。
+// 目录不在、检出的分支也没了的 worktree，git 报的提交号全是 0：没有提交可写。
+func was(t *msg.Text, it judge.Item) string {
+	if strings.Trim(it.Head, "0") == "" {
+		return t.WasNoCommit
+	}
+	short := it.Head[:8]
+	switch {
+	case it.Kind == judge.KindBranch:
+		return fmt.Sprintf(t.WasBranch, short)
+	case it.Branch != "":
+		return fmt.Sprintf(t.WasOnBranch, it.Branch, short)
+	}
+	return fmt.Sprintf(t.WasDetached, short)
 }
 
 func refDesc(t *msg.Text, w judge.Item) string {

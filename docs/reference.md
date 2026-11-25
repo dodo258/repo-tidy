@@ -11,6 +11,17 @@
 - 下层读不了的目录（没权限）跳过；给的路径本身读不了才报错。
 - 另一个仓库的附加 worktree 放在扫描目录里时，按主工作区去重，同一个仓库只扫一遍。
 
+### 排除路径
+
+`--exclude <路径>` 跳过这个路径本身和它下面的仓库，可以写多次；环境变量 `REPO_TIDY_EXCLUDE` 也认，多个路径用冒号隔开（空段忽略），和命令行给的合在一起用。
+
+- 路径可以是绝对路径、相对当前目录的路径，或 `~`、`~/` 开头（按主目录展开）；不必存在。`--exclude ""` 是参数错（退出码 2）。
+- 按目录边界比：排除 `~/projects/app` 会跳过 `~/projects/app` 和 `~/projects/app/...`，不会跳过 `~/projects/app2`。路径经过符号链接的，按链接本身和解析后的样子都比一次。
+- 显式给的扫描路径、往下找到的仓库都一样排除；仓库的任何一个工作区（主工作区或附加 worktree，哪怕放在扫描目录外面）落在排除路径下，整个仓库都跳过。同一个仓库从几个路径进来、或被几个排除路径同时命中，只算一次。
+- 排除在判定和体检之前：被排除的仓库不判定、不体检、不出现在报告里，`--apply`（含 `--select`）不删也不列它里面的项。
+- 总览最后注明「跳过 N 个仓库（--exclude）」，JSON 写在 `summary.excluded`、删除结果的 `excluded`。全部被排除时照常成功退出，报告里零个仓库。
+- `--undo` 不能和 `--exclude` 一起用（环境变量不影响 `--undo`）。
+
 ## 报告的顺序
 
 开头是总览：扫了几个仓库（其中几个干净、几个扫描失败）、共多少附加 worktree 和本地分支、可删多少项、留着多少项（其中几项有未合并内容）、可删项能腾出多少空间。腾出的空间只算可删 worktree 的目录大小；删分支只删引用，提交对象要等 gc、还可能被别的分支用着，不算。
@@ -41,6 +52,15 @@
 
 worktree 只在干净（没有改动、没有未跟踪文件、没有做到一半的操作、被忽略的文件都能重新生成或主工作区有同样一份）、没人在用，且检出的提交满足上面任一条时才算可删。目录已不在的 worktree 只清登记。
 
+### 锁定的 worktree
+
+`git worktree lock` 锁着的 worktree 默认留着。例外是锁已失效：锁原因里写了持锁进程的 pid（`pid N` 在开头，或前面是空格、左括号，如 Claude Code 写的 `claude session <名字> (pid N start …)`），而这些进程都已不在了——会话崩掉、被强杀或关了终端，锁就留在那里没人解。这时照没锁一样判：上面的干净、没人在用、提交证据一条不少，都满足才可删，证据后面注明「锁已失效：持锁进程（pid N）已退出，删时先解锁」。目录也不在了的只清登记，但要先看 git 里这个 worktree 的登记目录（`.git/worktrees/<名字>/`）：里面的 index、HEAD、reflog 在 `--min-idle` 之内动过就留着。
+
+- 进程还在不在用 `kill(pid, 0)` 问：只有回「没有这个进程」才算不在，别的用户的进程（没权限）算在。锁原因里写了几个 pid，要全都不在。
+- 持锁进程还在，写「已锁定，持锁进程还在运行（pid N）：<原因>」；锁原因没写 pid（自己锁的、放在移动硬盘上的），写「已锁定：<原因>」，都留着。
+- 只看得到本机的进程：在容器或别的机器上跑的会话锁的 worktree，本机查不到那个 pid，会当作已退出。这类 worktree 正在用时，靠的是「最近没动过」那条挡住（目录不在本机时看登记目录）；长时间不动又放在共享目录里的，用 `--exclude` 排除。
+- 删的时候先 `git worktree unlock` 再删（或清登记）；没删成就按原来的锁原因锁回去。恢复日志里的恢复命令不重建锁。
+
 「没人在用」要两条都满足，否则留着，检出的分支也跟着留着：
 
 - **没有进程的工作目录在 worktree 里**（含子目录）。macOS 等用 `lsof -d cwd -Fpcn` 查，Linux 读 `/proc/*/cwd`，超时 10 秒；有就写出进程名和 pid（如「sleep（pid 4321）」）。只看得到当前用户能看到的进程。没查成（超时、`lsof` 没装）就当作每个 worktree 都可能在用，原因写「没查成」。
@@ -67,13 +87,13 @@ worktree 只在干净（没有改动、没有未跟踪文件、没有做到一�
   "generated_at": "2026-11-12T17:47:33+08:00",
   "summary": {"repos": 2, "failed": 0, "clean": 0, "worktrees": 2, "branches": 5,
               "removable_worktrees": 1, "removable_branches": 3, "keep_worktrees": 1, "keep_branches": 2,
-              "unmerged": 2, "free_bytes": 22, "unmeasured": 0, "filter": null},
+              "unmerged": 2, "free_bytes": 22, "unmeasured": 0, "filter": null, "excluded": 0},
   "repos": [{"root": "...", "default_branch": "main", "note": "", "error": "", "mess": 5, "clean": false,
              "worktrees": [...], "branches": [...], "health": {...}}]
 }
 ```
 
-`summary` 就是文字报告开头的总览：`repos`（扫了几个）、`failed`（扫描失败）、`clean`（干净）、`worktrees`/`branches`（附加 worktree、本地分支总数）、`removable_*`/`keep_*`（可删、留着各几个）、`unmerged`（留着的项里有未合并内容的）、`free_bytes`（可删 worktree 的目录大小之和）、`unmeasured`（可删 worktree 里没量到大小的个数）。用了 `--older-than` 或 `--only` 时这些数字都按筛选后的算，`filter` 写出条件：`{"older_than": "30d", "older_than_seconds": 2592000, "only": "branches"}`（`older_than` 是原样的写法、没按时间筛为 `""`，`older_than_seconds` 是换成的秒数、没按时间筛为 `0`，`only` 是 `worktrees`、`branches` 或 `""`）；没筛时 `filter` 为 `null`。`repos[]` 里也只有筛选后的项。
+`summary` 就是文字报告开头的总览：`repos`（扫了几个）、`failed`（扫描失败）、`clean`（干净）、`worktrees`/`branches`（附加 worktree、本地分支总数）、`removable_*`/`keep_*`（可删、留着各几个）、`unmerged`（留着的项里有未合并内容的）、`free_bytes`（可删 worktree 的目录大小之和）、`unmeasured`（可删 worktree 里没量到大小的个数）。用了 `--older-than` 或 `--only` 时这些数字都按筛选后的算，`filter` 写出条件：`{"older_than": "30d", "older_than_seconds": 2592000, "only": "branches"}`（`older_than` 是原样的写法、没按时间筛为 `""`，`older_than_seconds` 是换成的秒数、没按时间筛为 `0`，`only` 是 `worktrees`、`branches` 或 `""`）；没筛时 `filter` 为 `null`。`repos[]` 里也只有筛选后的项。`excluded` 是 `--exclude`（含 `REPO_TIDY_EXCLUDE`）跳过了几个仓库，不算在 `repos` 里，`repos[]` 里也没有它们；没排除时为 `0`。
 
 `repos[]` 和文字报告同一个顺序（乱的在前），每个仓库：
 
@@ -124,8 +144,9 @@ worktree 只在干净（没有改动、没有未跟踪文件、没有做到一�
 - 只删这次报告里的可删项：用了 `--older-than`、`--only` 时，筛掉的项不删。
 - 删之前重新判定，只删报告时和现在都可删、提交没变的项。重新判定会现查进程和最近活动（用同一个 `--min-idle`），报告之后才开始用的 worktree 也不删，结果里写出现在要留着的原因。
 - 靠「已推到远程」可删的，先 `git ls-remote` 联网确认远程现在还包含这个提交（超时 20 秒），确认不了就不删。
-- worktree 用 `git worktree remove`（不加 `--force`），分支用 `git branch -D`。
+- worktree 用 `git worktree remove`（不加 `--force`），分支用 `git branch -D`。锁已失效的 worktree 先 `git worktree unlock`，没删成就按原来的原因锁回去。
 - 每一项删之前把恢复命令写进 `${XDG_STATE_HOME:-~/.local/state}/repo-tidy/apply-<时间>.log`：先跑分支的 `git branch <名字> <提交>`，再跑 worktree 的 `git worktree add`。提交对象在 git gc 清掉之前都在。
+- 删了的每一项在结果里写原来指向的提交（短提交号）：分支写「原来指向 ed620ec2」，worktree 写检出的分支和提交；完整提交号在恢复日志里。
 
 ## 撤销
 
@@ -168,7 +189,8 @@ worktree 只在干净（没有改动、没有未跟踪文件、没有做到一�
 | `log` | 恢复日志的路径；一项都没删时为 `""` |
 | `target` | 打算删几项：给了 `--select` 是列的项数，否则是全部可删项 |
 | `deleted` | 实际删了几项 |
-| `results[]` | 每项：`repo`、`kind`、`name`、`done`（删了没有）、`message`（做了什么或为什么没做） |
+| `excluded` | `--exclude` 跳过了几个仓库；这些仓库里勾选的项不删、不算进 `target`、不出现在 `results[]` |
+| `results[]` | 每项：`repo`、`kind`、`name`、`done`（删了没有）、`message`（删了的写原来指向的提交，没删的写为什么） |
 | `errors[]` | 整个仓库出的错：`repo`、`error`（比如删前重新判定失败） |
 
 没删全（`deleted < target`）或有仓库出错时退出码是 1。

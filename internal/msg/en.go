@@ -10,7 +10,7 @@ var en = Text{
 	Detached:  "detached HEAD",
 	Kinds:     struct{ Worktree, Branch string }{"worktree", "branch"},
 
-	Usage: `Usage: repo-tidy [--apply | --json] [--verbose] [--online] [--backup-remote NAME] [--progress] [--min-idle DURATION] [--depth N] [--older-than DURATION] [--only worktrees|branches] [--lang zh|en] [PATH...]
+	Usage: `Usage: repo-tidy [--apply [--select FILE|-] | --json] [--verbose] [--online] [--backup-remote NAME] [--progress] [--min-idle DURATION] [--depth N] [--exclude PATH]... [--older-than DURATION] [--only worktrees|branches] [--lang zh|en] [PATH...]
        repo-tidy --undo [LOG] [--apply] [--json] [--lang zh|en]
 
 Scans the extra worktrees and local branches in your repos and sorts them into
@@ -25,6 +25,10 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
   --apply    Delete the items marked removable. Each item is re-checked first; items that are
              removable because they were pushed are confirmed online first.
              Restore commands go to ${XDG_STATE_HOME:-~/.local/state}/repo-tidy/apply-<time>.log
+  --select FILE|-
+             With --apply, delete only the items listed in FILE (- reads stdin). The format is
+             {"items": [...]}, each item copied unchanged from the --json output; items that have
+             changed since are not deleted. With no PATH, only the repos of these items are scanned.
   --undo [LOG]
              Restore what an --apply deleted, from its restore log (default: the newest log in
              ${XDG_STATE_HOME:-~/.local/state}/repo-tidy/). Only lists what would be restored;
@@ -50,6 +54,12 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
   --depth N  How many levels below a directory to look for repos (default 1, at most 4).
              For ~/code/<org>/<repo>, use --depth 2. Repos found are not searched further;
              hidden directories, node_modules and symlinks are skipped.
+  --exclude PATH
+             Skip this path and the repos below it (repeatable; absolute, relative to the
+             current directory, or ~/). If any worktree of a repo (main or extra) is under it,
+             the whole repo is skipped: not reported or checked, and --apply (with or without
+             --select) won't delete anything in it. The overview says "skipped N repos (--exclude)".
+             REPO_TIDY_EXCLUDE is also read: colon-separated paths, added to the ones given here.
   --older-than DURATION
              Only show worktrees and branches last active more than this long ago
              (e.g. 30d, 2w, 36h).
@@ -70,6 +80,8 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	BadOlderThan:     "--older-than must be a positive number with a unit, like 30d, 2w or 36h, got %q",
 	BadOnly:          "--only must be worktrees or branches, got %q",
 	UndoWithFilter:   "--undo can't be used with --older-than or --only",
+	UndoWithExclude:  "--undo can't be used with --exclude",
+	EmptyExclude:     "--exclude can't be empty",
 	SelectNeedsApply: "--select only works with --apply",
 	NoRepos:          "no git repositories found under these paths",
 	WriteJSON:        "writing JSON: %v",
@@ -120,6 +132,7 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	RemovableLine:   "          removable: %d (worktrees %d, branches %d), %s\n",
 	KeptLine:        "          keep: %d (worktrees %d, branches %d)",
 	KeptUnmerged:    ", %d with unmerged work",
+	ExcludedLine:    Count{"          skipped %d repo (--exclude)\n", "          skipped %d repos (--exclude)\n"},
 	FilterLine:      "          filtered: %s (other items aren't shown or counted above, and --apply won't delete them)\n",
 	FilterOlder:     "last active more than %s ago",
 	FilterOnlyWT:    "extra worktrees only",
@@ -201,24 +214,26 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	ListTracking:      "listing remote-tracking refs: %w",
 	CountUnique:       "counting unique commits: %w",
 
-	EvSame:          "points at the same commit as %s: %s",
-	EvSameShort:     "same as %s %s",
-	EvOnDef:         "already on %s: commit %s",
-	EvOnDefShort:    "on %s %s",
-	EvMerged:        "merged into %s: commit %s",
-	EvMergedShort:   "merged into %s %s",
-	EvSquash:        "content squashed into %s: commit %s",
-	EvSquashShort:   "squashed into %s %s",
-	EvRebase:        "all commits rebased onto %s: %s",
-	EvRebaseShort:   "rebased onto %s %s",
-	EvNoNet:         "no net changes relative to %s",
-	EvContent:       "content is all in %s: from commit %s on, merging it adds nothing",
-	EvContentShort:  "content in %s %s",
-	EvPushed:        "pushed to %s/%s (the remote commit on record, %s, contains it)",
-	EvPushedShort:   "pushed to %s/%s",
-	EvPrunable:      "directory no longer exists; only git's record of it is cleared",
-	EvPrunableShort: "dir gone, only clears git's record",
-	EvRemoveWTFirst: "; remove the worktree that has it checked out first",
+	EvSame:           "points at the same commit as %s: %s",
+	EvSameShort:      "same as %s %s",
+	EvOnDef:          "already on %s: commit %s",
+	EvOnDefShort:     "on %s %s",
+	EvMerged:         "merged into %s: commit %s",
+	EvMergedShort:    "merged into %s %s",
+	EvSquash:         "content squashed into %s: commit %s",
+	EvSquashShort:    "squashed into %s %s",
+	EvRebase:         "all commits rebased onto %s: %s",
+	EvRebaseShort:    "rebased onto %s %s",
+	EvNoNet:          "no net changes relative to %s",
+	EvContent:        "content is all in %s: from commit %s on, merging it adds nothing",
+	EvContentShort:   "content in %s %s",
+	EvPushed:         "pushed to %s/%s (the remote commit on record, %s, contains it)",
+	EvPushedShort:    "pushed to %s/%s",
+	EvPrunable:       "directory no longer exists; only git's record of it is cleared",
+	EvPrunableShort:  "dir gone, only clears git's record",
+	EvRemoveWTFirst:  "; remove the worktree that has it checked out first",
+	EvStaleLock:      "; stale lock: the process holding it (pid %s) has exited, so it is unlocked before removal",
+	EvStaleLockShort: "; stale lock pid %s",
 
 	MainBranch:      "checked out in the main worktree",
 	InKeptWorktree:  "checked out in a kept worktree: %s",
@@ -227,6 +242,7 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	NotOnDefault:    "%s neither in %s nor pushed to any remote: %s",
 	Locked:          "locked",
 	LockedWhy:       "locked: %s",
+	LockedLive:      "locked, and the process holding the lock is still running (pid %s): %s",
 	CantRead:        "can't read this worktree, keeping it to be safe: %s",
 	InProgress:      "has a %s in progress",
 	RebaseOrAm:      "rebase or am",
@@ -249,9 +265,13 @@ With no PATH, scans $REPO_TIDY_ROOT, or ~/projects if that isn't set.
 	Gone:           "no longer exists",
 	ChangedKeep:    "changed since the report, left alone: now kept, %s",
 	Changed:        "changed since the report, left alone",
-	Pruned:         "cleared git's record",
-	Removed:        "deleted",
+	Pruned:         "cleared git's record, %s",
+	WasBranch:      "was at %s",
+	WasOnBranch:    "was on branch %s @ %s",
+	WasDetached:    "was on a detached HEAD @ %s",
+	WasNoCommit:    "wasn't at any commit",
 	Failed:         "failed: %s",
+	RelockFailed:   "%s; locking it again with its old reason also failed: %s",
 	ConfirmFailed:  "couldn't confirm %s online, so can't prove the remote still has this commit: %s",
 	RemoteGone:     "remote %s no longer has %s, can't prove it's safe",
 	RemoteUnknown:  "on remote %s, %s now points at %s, which isn't here locally; fetch first",
